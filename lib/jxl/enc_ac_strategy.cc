@@ -52,7 +52,7 @@
 
 // Set JXL_DEBUG_AC_STRATEGY to 1 to enable debugging.
 #ifndef JXL_DEBUG_AC_STRATEGY
-#define JXL_DEBUG_AC_STRATEGY 0
+#define JXL_DEBUG_AC_STRATEGY 1
 #endif
 
 // This must come before the begin/end_target, but HWY_ONCE is only true
@@ -1189,10 +1189,57 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
   }
 
   if (JXL_DEBUG_AC_STRATEGY && WantDebugOutput(cparams)) {
+    printf("ok");
     JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, frame_dim.xsize,
                                        frame_dim.ysize, "ac_strategy", aux_out,
                                        cparams));
   }
+#if JXL_DEBUG_AC_STRATEGY
+  {
+    // Sadece bir kez çalışmasını sağlamak için static bir bayrak kullanıyoruz.
+    static bool debug_visual_saved = false;
+
+    // Eğer görsel daha önce kaydedilmediyse bu bloğa gir.
+    if (!debug_visual_saved) {
+      printf(">>> DEBUG: İlk grup için DumpAcStrategy bloguna giriliyor...\n");
+
+      // Görseli kaydetmek için basit bir dosya yazma fonksiyonu.
+      auto file_writer_callback = [](void* opaque, const char* label,
+                                     size_t xsize, size_t ysize,
+                                     const JxlColorEncoding* color,
+                                     const uint16_t* pixels) {
+        char filename[256];
+        snprintf(filename, sizeof(filename), "%s.ppm", label);
+        FILE* f = fopen(filename, "wb");
+        if (f) {
+          fprintf(f, "P6\n%zu %zu\n65535\n", xsize, ysize);
+          fwrite(pixels, sizeof(uint16_t), xsize * ysize * 3, f);
+          fclose(f);
+          printf(">>> BASARILI: AC Strategy debug gorseli kaydedildi: %s\n", filename);
+        }
+      };
+
+      // Fonksiyonu tetiklemek için geçici parametreler oluşturuyoruz.
+      CompressParams debug_cparams = cparams;
+      debug_cparams.debug_image = file_writer_callback;
+      debug_cparams.debug_image_opaque = nullptr;
+
+      // === DEĞİŞİKLİK BURADA ===
+      // GÖRSEL BOYUTUNU TAM RESİM YERİNE, İŞLENEN GRUBUN BOYUTUYLA AYARLIYORUZ.
+      // Strateji haritasının boyutları blok cinsindendir, bunu piksele çeviriyoruz (1 blok = 8 piksel).
+      const size_t strategy_xsize = ac_strategy.xsize() * kBlockDim;
+      const size_t strategy_ysize = ac_strategy.ysize() * kBlockDim;
+
+      // DumpAcStrategy fonksiyonunu, işlenen grubun gerçek boyutlarıyla manuel olarak tetikliyoruz.
+      JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, strategy_xsize,
+                          strategy_ysize, "ac_strategy_gorseli",
+                          aux_out, debug_cparams));
+
+      // Bayrağı 'true' olarak ayarlıyoruz ki bu blok bir daha çalışmasın.
+      debug_visual_saved = true;
+    }
+  }
+#endif
   return true;
 }
 
