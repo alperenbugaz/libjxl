@@ -1196,14 +1196,11 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
   }
 #if JXL_DEBUG_AC_STRATEGY
   {
-    // Sadece bir kez çalışmasını sağlamak için static bir bayrak kullanıyoruz.
     static bool debug_visual_saved = false;
 
-    // Eğer görsel daha önce kaydedilmediyse bu bloğa gir.
     if (!debug_visual_saved) {
       printf(">>> DEBUG: İlk grup için DumpAcStrategy bloguna giriliyor...\n");
 
-      // Görseli kaydetmek için basit bir dosya yazma fonksiyonu.
       auto file_writer_callback = [](void* opaque, const char* label,
                                      size_t xsize, size_t ysize,
                                      const JxlColorEncoding* color,
@@ -1219,23 +1216,17 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
         }
       };
 
-      // Fonksiyonu tetiklemek için geçici parametreler oluşturuyoruz.
       CompressParams debug_cparams = cparams;
       debug_cparams.debug_image = file_writer_callback;
       debug_cparams.debug_image_opaque = nullptr;
 
-      // === DEĞİŞİKLİK BURADA ===
-      // GÖRSEL BOYUTUNU TAM RESİM YERİNE, İŞLENEN GRUBUN BOYUTUYLA AYARLIYORUZ.
-      // Strateji haritasının boyutları blok cinsindendir, bunu piksele çeviriyoruz (1 blok = 8 piksel).
       const size_t strategy_xsize = ac_strategy.xsize() * kBlockDim;
       const size_t strategy_ysize = ac_strategy.ysize() * kBlockDim;
 
-      // DumpAcStrategy fonksiyonunu, işlenen grubun gerçek boyutlarıyla manuel olarak tetikliyoruz.
       JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, strategy_xsize,
                           strategy_ysize, "ac_strategy_gorseli",
                           aux_out, debug_cparams));
 
-      // Bayrağı 'true' olarak ayarlıyoruz ki bu blok bir daha çalışmasın.
       debug_visual_saved = true;
     }
   }

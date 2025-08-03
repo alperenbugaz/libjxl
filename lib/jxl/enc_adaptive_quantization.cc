@@ -60,7 +60,7 @@
 
 // Set JXL_DEBUG_ADAPTIVE_QUANTIZATION to 1 to enable debugging.
 #ifndef JXL_DEBUG_ADAPTIVE_QUANTIZATION
-#define JXL_DEBUG_ADAPTIVE_QUANTIZATION 0
+#define JXL_DEBUG_ADAPTIVE_QUANTIZATION 1
 #endif
 
 HWY_BEFORE_NAMESPACE();
@@ -1013,6 +1013,61 @@ Status FindBestQuantization(const FrameHeader& frame_header,
       JXL_RETURN_IF_ERROR(DumpHeatmaps(cparams, aux_out, butteraugli_target,
                                        quant_field, tile_distmap, diffmap));
     }
+
+  //visualization
+    {
+  auto file_writer_callback = [](void* opaque, const char* label,
+                                 size_t xsize, size_t ysize,
+                                 const JxlColorEncoding* color_encoding,
+                                 const uint16_t* pixels) -> void {
+    char filename[256];
+    int iter_num = *reinterpret_cast<int*>(opaque);
+    snprintf(filename, sizeof(filename), "%s_iter%d.ppm", label, iter_num);
+    FILE* f = fopen(filename, "wb");
+    if (!f) {
+        fprintf(stderr, "HATA: Debug dosyasi acilamadi: %s\n", filename);
+        return;
+    }
+    fprintf(f, "P6\n%zu %zu\n65535\n", xsize, ysize);
+    fwrite(pixels, sizeof(uint16_t), xsize * ysize * 3, f);
+    fclose(f);
+    printf(">>> DEBUG: Gorsel kaydedildi: %s\n", filename);
+  };
+
+  CompressParams debug_cparams = cparams;
+  debug_cparams.debug_image = file_writer_callback;
+  debug_cparams.debug_image_opaque = &i;
+
+  printf(">>> DEBUG: Iterasyon %d için gorseller zorla yazdiriliyor...\n", i);
+
+  JXL_RETURN_IF_ERROR(DumpImage(debug_cparams, "dec", *dec_linear.color()));
+
+  JxlMemoryManager* memory_manager = quant_field.memory_manager();
+
+  // 2a. quant_heatmap
+  ImageF inv_qmap;
+  JXL_ASSIGN_OR_RETURN(inv_qmap, ImageF::Create(memory_manager, quant_field.xsize(), quant_field.ysize()));
+  for (size_t y = 0; y < quant_field.ysize(); ++y) {
+    const float* JXL_RESTRICT row_q = quant_field.Row(y);
+    float* JXL_RESTRICT row_inv_q = inv_qmap.Row(y);
+    for (size_t x = 0; x < quant_field.xsize(); ++x) {
+      row_inv_q[x] = 1.0f / row_q[x];
+    }
+  }
+  Image3F quant_heatmap;
+  JXL_ASSIGN_OR_RETURN(quant_heatmap, CreateHeatMapImage(inv_qmap, 4.0f * butteraugli_target, 6.0f * butteraugli_target));
+  JXL_RETURN_IF_ERROR(DumpImage(debug_cparams, "quant_heatmap", quant_heatmap));
+
+  // 2b. tile_heatmap
+  Image3F tile_heatmap_img;
+  JXL_ASSIGN_OR_RETURN(tile_heatmap_img, CreateHeatMapImage(tile_distmap, butteraugli_target, 1.5f * butteraugli_target));
+  JXL_RETURN_IF_ERROR(DumpImage(debug_cparams, "tile_heatmap", tile_heatmap_img));
+
+  // 2c. bt_diffmap
+  Image3F bt_diffmap_img;
+  JXL_ASSIGN_OR_RETURN(bt_diffmap_img, CreateHeatMapImage(diffmap, ButteraugliFuzzyInverse(1.5), ButteraugliFuzzyInverse(0.5)));
+  JXL_RETURN_IF_ERROR(DumpImage(debug_cparams, "bt_diffmap", bt_diffmap_img));
+}
     if (aux_out != nullptr) ++aux_out->num_butteraugli_iters;
     if (JXL_DEBUG_ADAPTIVE_QUANTIZATION) {
       float minval;
