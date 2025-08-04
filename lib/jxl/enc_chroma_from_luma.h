@@ -68,7 +68,11 @@ struct CfLHeuristics {
            + dct_scratch_size + dc_scratch_size;
   }
 };
+struct CompressParams;
 
+Status DumpCfLMap(JxlMemoryManager* memory_manager, const ImageSB& map,
+                  size_t xsize, size_t ysize, const char* tag,
+                  const CompressParams& cparams);
 }  // namespace jxl
 
 #endif  // LIB_JXL_ENC_CHROMA_FROM_LUMA_H_

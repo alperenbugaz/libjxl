@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file.
 
 #include "lib/jxl/enc_chroma_from_luma.h"
+#include "lib/jxl/enc_debug_image.h"
 
 #include <jxl/memory_manager.h>
 
@@ -385,7 +386,45 @@ Status CfLHeuristics::ComputeTile(const Rect& r, const Image3F& opsin,
       opsin, opsin_rect, dequant, ac_strategy, raw_quant_field, quantizer, r,
       fast, use_dct8, &cmap->ytox_map, &cmap->ytob_map, &dc_values, scratch);
 }
+void CfLMultiplierToColor(int8_t multiplier, float* rgb) {
+  float val = multiplier / 128.0f;
+  if (val >= 0) {
+    rgb[0] = 1.0f;
+    rgb[1] = 1.0f - val;
+    rgb[2] = 1.0f - val;
+  } else {
+    rgb[2] = 1.0f;
+    rgb[0] = 1.0f + val;
+    rgb[1] = 1.0f + val;
+  }
+}
 
+Status DumpCfLMap(JxlMemoryManager* memory_manager, const ImageSB& map,
+                  size_t xsize, size_t ysize, const char* tag,
+                  const CompressParams& cparams) {
+  JXL_ASSIGN_OR_RETURN(Image3F color_map,
+                       Image3F::Create(memory_manager, xsize, ysize));
+
+  for (size_t y = 0; y < ysize; ++y) {
+
+    const int8_t* JXL_RESTRICT map_row = map.Row(y / kColorTileDim);
+    float* JXL_RESTRICT row_r = color_map.PlaneRow(0, y);
+    float* JXL_RESTRICT row_g = color_map.PlaneRow(1, y);
+    float* JXL_RESTRICT row_b = color_map.PlaneRow(2, y);
+
+    for (size_t x = 0; x < xsize; ++x) {
+
+      int8_t multiplier = map_row[x / kColorTileDim];
+      float rgb[3];
+      CfLMultiplierToColor(multiplier, rgb);
+      row_r[x] = rgb[0];
+      row_g[x] = rgb[1];
+      row_b[x] = rgb[2];
+    }
+  }
+
+  return DumpImage(cparams, tag, color_map);
+}
 Status ColorCorrelationEncodeDC(const ColorCorrelation& color_correlation,
                                 BitWriter* writer, LayerType layer,
                                 AuxOut* aux_out) {
