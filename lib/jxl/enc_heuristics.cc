@@ -1204,6 +1204,34 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
   JXL_RETURN_IF_ERROR(
       RunOnPool(pool, 0, num_tiles, prepare, process_tile, "Enc Heuristics"));
 
+  {
+    CompressParams cparams_for_debug = cparams;
+
+    if (cparams_for_debug.debug_image == nullptr) {
+      static auto default_file_writer =
+          [](void* opaque, const char* label, size_t xsize, size_t ysize,
+             const JxlColorEncoding* color, const uint16_t* pixels) {
+            char filename[256];
+            snprintf(filename, sizeof(filename), "%s.ppm", label);
+            FILE* f = fopen(filename, "wb");
+            if (f) {
+              fprintf(f, "P6\n%zu %zu\n65535\n", xsize, ysize);
+              fwrite(pixels, sizeof(uint16_t), xsize * ysize * 3, f);
+              fclose(f);
+              printf(">>> DEBUG GORSELI KAYDEDILDI: %s\n", filename);
+            }
+      };
+      cparams_for_debug.debug_image = default_file_writer;
+      cparams_for_debug.debug_image_opaque = nullptr;
+    }
+
+    JXL_RETURN_IF_ERROR(DumpCfLMap(memory_manager, cmap.ytox_map,
+                                   frame_dim.xsize, frame_dim.ysize,
+                                   "cfl_ytox", cparams_for_debug));
+    JXL_RETURN_IF_ERROR(DumpCfLMap(memory_manager, cmap.ytob_map,
+                                   frame_dim.xsize, frame_dim.ysize,
+                                   "cfl_ytob", cparams_for_debug));
+  }
   JXL_RETURN_IF_ERROR(acs_heuristics.Finalize(frame_dim, ac_strategy, aux_out));
 
   // Refine quantization levels.

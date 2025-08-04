@@ -4,7 +4,9 @@
 // license that can be found in the LICENSE file.
 
 #include "lib/jxl/enc_frame.h"
-
+#include <fstream>
+#include <string>
+#include <vector>
 #include <jxl/cms_interface.h>
 #include <jxl/encode.h>
 #include <jxl/memory_manager.h>
@@ -86,6 +88,31 @@
 
 namespace jxl {
 
+//debug xyb color output
+void SavePlaneToPPM(const jxl::ImageF& plane, const std::string& filename,
+                    float offset, float scale) {
+  std::ofstream file(filename, std::ios::binary);
+  if (!file) {
+    fprintf(stderr, "HATA: PPM dosyasi acilamadi: %s\n", filename.c_str());
+    return;
+  }
+
+  file << "P5\n" << plane.xsize() << " " << plane.ysize() << "\n255\n";
+
+  std::vector<unsigned char> row_buffer(plane.xsize());
+  for (size_t y = 0; y < plane.ysize(); ++y) {
+    const float* const row = plane.Row(y);
+    for (size_t x = 0; x < plane.xsize(); ++x) {
+      float normalized_val = (row[x] + offset) * scale;
+      unsigned char pixel = static_cast<unsigned char>(
+          std::max(0.f, std::min(255.f, normalized_val)));
+      row_buffer[x] = pixel;
+    }
+    file.write(reinterpret_cast<const char*>(row_buffer.data()),
+               plane.xsize());
+  }
+  fprintf(stdout, "XYB Kanali Kaydedildi: %s\n", filename.c_str());
+}
 Status ParamsPostInit(CompressParams* p) {
   if (!p->manual_noise.empty() &&
       p->manual_noise.size() != NoiseParams::kNumNoisePoints) {
@@ -1563,6 +1590,16 @@ Status ComputeEncodingData(
       }
       JXL_RETURN_IF_ERROR(ToXYB(c_enc, metadata->m.IntensityTarget(), black,
                                 pool, &color, cms, linear));
+
+      //debug xyb color output
+      static bool g_xyb_channels_saved = false;
+      if (!g_xyb_channels_saved) {
+        SavePlaneToPPM(color.Plane(1), "y_channel.ppm", 0.0f, 255.0f);
+        SavePlaneToPPM(color.Plane(0), "x_channel.ppm", 0.5f, 255.0f);
+        SavePlaneToPPM(color.Plane(2), "b_channel.ppm", 0.5f, 255.0f);
+
+        g_xyb_channels_saved = true;
+      }
     } else {
       // Nothing to do.
       // RGB or YCbCr: forward YCbCr is not implemented, this is only used when
