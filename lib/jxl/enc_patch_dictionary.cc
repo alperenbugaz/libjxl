@@ -47,9 +47,83 @@
 #include "lib/jxl/pack_signed.h"
 #include "lib/jxl/patch_dictionary_internal.h"
 
+//debug
+#include <fstream>
+#include "lib/jxl/base/random.h"
+
 namespace jxl {
 
+
+//------------BEGIN - DEBUG SPLINES VISU-----------------------------
+void PrintPatchStats(const std::vector<PatchInfo>& info) {
+  fprintf(stderr, ">>> Yama Analizi Tamamlandı:\n");
+  fprintf(stderr, "    Toplam %zu adet benzersiz yama bulundu.\n", info.size());
+  for (size_t i = 0; i < info.size(); ++i) {
+    const auto& patch = info[i].first;
+    const auto& positions = info[i].second;
+    fprintf(stderr, "    --> Yama %-3zu | Boyut: %-7s | Kullanım Sayısı: %zu\n", i,
+            (std::to_string(patch.xsize) + "x" + std::to_string(patch.ysize)).c_str(),
+            positions.size());
+  }
+}
+
+Status SavePatchLocationsVisualisation(
+    const std::vector<PatchInfo>& info,
+    const PassesEncoderState* JXL_RESTRICT state,
+    JxlMemoryManager* memory_manager) {
+  const auto& frame_dim = state->shared.frame_dim;
+
+  JXL_ASSIGN_OR_RETURN(
+      Image3F locations_vis,
+      Image3F::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
+
+  ZeroFillImage(&locations_vis);
+  Rng rng(1337);
+
+  for (size_t i = 0; i < info.size(); ++i) {
+    const auto& patch = info[i].first;
+    const auto& positions = info[i].second;
+    float color[3] = {rng.UniformF(0.25f, 1.0f), rng.UniformF(0.25f, 1.0f),
+                      rng.UniformF(0.25f, 1.0f)};
+    for (const auto& pos : positions) {
+      for (size_t y = 0; y < patch.ysize; ++y) {
+        for (size_t x = 0; x < patch.xsize; ++x) {
+          if (pos.second + y < locations_vis.ysize() &&
+              pos.first + x < locations_vis.xsize()) {
+            locations_vis.Plane(0).Row(pos.second + y)[pos.first + x] =
+                color[0];
+            locations_vis.Plane(1).Row(pos.second + y)[pos.first + x] =
+                color[1];
+            locations_vis.Plane(2).Row(pos.second + y)[pos.first + x] =
+                color[2];
+          }
+        }
+      }
+    }
+  }
+
+  std::ofstream file("patches_locations.ppm", std::ios::binary);
+  file << "P6\n"
+       << locations_vis.xsize() << " " << locations_vis.ysize() << "\n255\n";
+  std::vector<uint8_t> row_buffer(locations_vis.xsize() * 3);
+  for (size_t y = 0; y < locations_vis.ysize(); ++y) {
+    for (size_t x = 0; x < locations_vis.xsize(); ++x) {
+      row_buffer[x * 3 + 0] =
+          static_cast<uint8_t>(locations_vis.Plane(0).Row(y)[x] * 255.0f);
+      row_buffer[x * 3 + 1] =
+          static_cast<uint8_t>(locations_vis.Plane(1).Row(y)[x] * 255.0f);
+      row_buffer[x * 3 + 2] =
+          static_cast<uint8_t>(locations_vis.Plane(2).Row(y)[x] * 255.0f);
+    }
+    file.write(reinterpret_cast<const char*>(row_buffer.data()),
+               row_buffer.size());
+  }
+  fprintf(stderr, ">>> Yama Konum Haritası Kaydedildi: patches_locations.ppm\n");
+
+  return true;
+}
 static constexpr size_t kPatchFrameReferenceId = 3;
+//------------END - DEBUG SPLINES VISU-------------------------------
 
 // static
 Status PatchDictionaryEncoder::Encode(const PatchDictionary& pdic,
@@ -769,10 +843,19 @@ Status FindBestPatchDictionary(const Image3F& opsin,
     }
     pref_positions.emplace_back(ref_pos);
   }
+  //------------BEGIN - DEBUG SPLINES VISU-----------------------------
+
+  PrintPatchStats(info);
+  JXL_RETURN_IF_ERROR(
+      SavePatchLocationsVisualisation(info, state, memory_manager));
+
+  //------------END - DEBUG SPLINES VISU-----------------------------
 
   CompressParams cparams = state->cparams;
   // Recursive application of patches could create very weird issues.
   cparams.patches = Override::kOff;
+
+
 
   if (WantDebugOutput(cparams)) {
     if (is_xyb) {

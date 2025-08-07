@@ -62,6 +62,10 @@
 #include "lib/jxl/quant_weights.h"
 #include "lib/jxl/render_pipeline/render_pipeline.h"
 
+
+//debug
+#include <fstream>
+#include "lib/jxl/base/random.h"
 namespace jxl {
 
 struct AuxOut;
@@ -204,6 +208,46 @@ void FindBestBlockEntropyModel(const CompressParams& cparams, const ImageI& rqf,
 }
 
 namespace {
+//------------BEGIN - DEBUG SPLINES VISU-----------------------------
+
+void SaveResidualImageAsPPM(const Image3F& image,
+                            const std::string& filename) {
+  std::ofstream file(filename, std::ios::binary);
+  if (!file) {
+    fprintf(stderr, "HATA: PPM dosyasi acilamadi: %s\n", filename.c_str());
+    return;
+  }
+  float max_abs = 1e-9f;
+  for (size_t c = 0; c < 3; ++c) {
+    for (size_t y = 0; y < image.ysize(); ++y) {
+      const float* row = image.Plane(c).Row(y);
+      for (size_t x = 0; x < image.xsize(); ++x) {
+        if (std::abs(row[x]) > max_abs) {
+          max_abs = std::abs(row[x]);
+        }
+      }
+    }
+  }
+  file << "P5\n" << image.xsize() << " " << image.ysize() << "\n255\n";
+  std::vector<uint8_t> row_buffer(image.xsize());
+  for (size_t y = 0; y < image.ysize(); ++y) {
+    const float* row_x = image.Plane(0).Row(y);
+    const float* row_y = image.Plane(1).Row(y);
+    const float* row_b = image.Plane(2).Row(y);
+    for (size_t x = 0; x < image.xsize(); ++x) {
+      float combined_residual = (std::abs(row_x[x]) * 0.2126f +
+                                 std::abs(row_y[x]) * 0.7152f +
+                                 std::abs(row_b[x]) * 0.0722f);
+      float normalized_value = (combined_residual / max_abs) * 255.0f;
+      row_buffer[x] =
+          static_cast<uint8_t>(std::max(0.f, std::min(255.f, normalized_value)));
+    }
+    file.write(reinterpret_cast<const char*>(row_buffer.data()),
+               row_buffer.size());
+  }
+  fprintf(stdout, ">>> Artık Görüntü Kaydedildi: %s\n", filename.c_str());
+}
+//------------END - DEBUG SPLINES VISU-----------------------------
 
 Status FindBestDequantMatrices(JxlMemoryManager* memory_manager,
                                const CompressParams& cparams,
@@ -1063,6 +1107,9 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
     JXL_RETURN_IF_ERROR(
         PatchDictionaryEncoder::SubtractFrom(image_features.patches, opsin));
   }
+  //------------BEGIN - DEBUG SPLINES VISU-----------------------------
+  SaveResidualImageAsPPM(*opsin, "residual_image.ppm");
+  //------------END - DEBUG SPLINES VISU-----------------------------
 
   const float quant_dc = InitialQuantDC(cparams.butteraugli_distance);
 
