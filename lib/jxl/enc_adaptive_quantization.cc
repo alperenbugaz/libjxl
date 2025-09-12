@@ -480,6 +480,8 @@ struct AdaptiveQuantizationImpl {
 
     const HWY_FULL(float) df;
 
+
+    //ALPCOM: MASK1X1 için piksel aralığını hesapla ve padding ekle
     size_t y_start_1x1 = rect_in.y0() + rect_out.y0() * 8;
     size_t y_end_1x1 = y_start_1x1 + rect_out.ysize() * 8;
 
@@ -495,6 +497,7 @@ struct AdaptiveQuantizationImpl {
       y_end_1x1 += 2;
     }
 
+    //ALPCOM: mask1x1 hesaplanması
     // Computes image (padded to multiple of 8x8) of local pixel differences.
     // Subsample both directions by 4.
     // 1x1 Laplacian of intensity.
@@ -505,6 +508,8 @@ struct AdaptiveQuantizationImpl {
       const float* row_in1 = xyb.ConstPlaneRow(1, y1);
       const float* row_in2 = xyb.ConstPlaneRow(1, y2);
       float* mask1x1_out = mask1x1->Row(y);
+
+      //ALPCOM:4X4'lük blok (8x8'in temeli)
       auto scalar_pixel1x1 = [&](size_t x) {
         const size_t x2 = x + 1 < xsize ? x + 1 : x;
         const size_t x1 = x > 0 ? x - 1 : x;
@@ -535,6 +540,8 @@ struct AdaptiveQuantizationImpl {
     if (x_end != xsize) x_end += 4;
     if (y_start != 0) y_start -= 4;
     if (y_end != ysize) y_end += 4;
+
+    //ALPCOM: pre_erosion'u alır (4x4'lük maske) ve ap_map (8x8) oluşturulur.
     JXL_RETURN_IF_ERROR(pre_erosion[thread].ShrinkTo((x_end - x_start) / 4,
                                                      (y_end - y_start) / 4));
 
@@ -615,10 +622,13 @@ struct AdaptiveQuantizationImpl {
                    rect_out.xsize() * 2, rect_out.ysize() * 2);
     JXL_RETURN_IF_ERROR(FuzzyErosion(butteraugli_target, from_rect,
                                      pre_erosion[thread], rect_out, &aq_map));
+
+    //ALPCOM: aq_map'e blok başına hesaplanmış bir değer ata
     for (size_t y = 0; y < rect_out.ysize(); ++y) {
       const float* aq_map_row = rect_out.ConstRow(aq_map, y);
       float* mask_row = rect_out.Row(mask, y);
       for (size_t x = 0; x < rect_out.xsize(); ++x) {
+        //ALPCOM:aq_map içindeki algısal skorları mask değerine dönüştür????????
         mask_row[x] = ComputeMaskForAcStrategyUse(aq_map_row[x]);
       }
     }
@@ -665,11 +675,19 @@ StatusOr<ImageF> AdaptiveQuantizationMap(const float butteraugli_target,
                                          const Image3F& xyb, const Rect& rect,
                                          float scale, ThreadPool* pool,
                                          ImageF* mask, ImageF* mask1x1) {
+
+  //ALPCOM:rect ile blok uyum kontrolü
   JXL_ENSURE(rect.xsize() % kBlockDim == 0);
   JXL_ENSURE(rect.ysize() % kBlockDim == 0);
   AdaptiveQuantizationImpl impl;
+  //ALPCOM: Rect'in boyutları (blok cinsinden)
   const size_t xsize_blocks = rect.xsize() / kBlockDim;
   const size_t ysize_blocks = rect.ysize() / kBlockDim;
+
+  //ALPCOM: Allocate işlemleri
+  //aq_map-> Blok başına bir değer
+  //mask-> blok başına tolerans çarpanı
+  //mask1x1-> bir piksel başına tolerans çarpanı
   JxlMemoryManager* memory_manager = xyb.memory_manager();
   JXL_ASSIGN_OR_RETURN(
       impl.aq_map, ImageF::Create(memory_manager, xsize_blocks, ysize_blocks));
@@ -677,10 +695,17 @@ StatusOr<ImageF> AdaptiveQuantizationMap(const float butteraugli_target,
       *mask, ImageF::Create(memory_manager, xsize_blocks, ysize_blocks));
   JXL_ASSIGN_OR_RETURN(
       *mask1x1, ImageF::Create(memory_manager, xyb.xsize(), xyb.ysize()));
+
+  //ALPCOM: Threadler çağırılıyor (num_thread kadar buffer hazırla)
   const auto prepare = [&](const size_t num_threads) -> Status {
     JXL_RETURN_IF_ERROR(impl.PrepareBuffers(memory_manager, num_threads));
     return true;
   };
+
+  //ALPCOM: Her bir tile için hesaplama başlat
+  //tile-> 256x256 rect-> alt bloklar blok-> 8x8 vb
+  //tid-> tile koordinatları
+  //rectout-> tile içindeki bloklar ????
   const auto process_tile = [&](const uint32_t tid,
                                 const size_t thread) -> Status {
     size_t n_enc_tiles = DivCeil(xsize_blocks, kEncTileDimInBlocks);
@@ -1315,7 +1340,7 @@ float InitialQuantDC(float butteraugli_target) {
   // this way (64).
   return std::min(kDcQuant / butteraugli_target_dc, 50.f);
 }
-
+//ALPCOM: WRAPPER FONKSİYON
 StatusOr<ImageF> InitialQuantField(const float butteraugli_target,
                                    const Image3F& opsin, const Rect& rect,
                                    ThreadPool* pool, float rescale,

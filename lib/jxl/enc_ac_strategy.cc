@@ -37,6 +37,9 @@
 #include "lib/jxl/enc_transforms-inl.h"
 #include "lib/jxl/simd_util.h"
 
+#include <fstream>
+#include <iomanip>
+
 // Some of the floating point constants in this file and in other
 // files in the libjxl project have been obtained using the
 // tools/optimizer/simplex_fork.py tool. It is a variation of
@@ -428,19 +431,19 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
     for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
       const auto in = Load(df, block + c * size + i);
       const auto in_y = Mul(Load(df, block + size + i), cmap_factor);
-      const auto im = Load(df, inv_matrix + i);
-      const auto val = Mul(Sub(in, in_y), Mul(im, quant));
-      const auto rval = Round(val);
-      const auto diff = Sub(val, rval);
-      const auto m = Load(df, matrix + i);
-      Store(Mul(m, diff), df, &mem[i]);
-      const auto q = Abs(rval);
+      const auto im = Load(df, inv_matrix + i); //ağırlıklar yüklenir
+      const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //Kuantalamaya (yuvarlamaya) hazır hale getirilmiş, ölçeklenmiş frekans katsayısı.
+      const auto rval = Round(val); //Kuantalanmış Katsayı
+      const auto diff = Sub(val, rval); //Kuantalama hatası
+      const auto m = Load(df, matrix + i); //ağırlıklar
+      Store(Mul(m, diff), df, &mem[i]); //kuantalama*ağırlık (bozulma)
+      const auto q = Abs(rval); //kuantalanmış katsayı büyüklüğü
       const auto q_is_zero = Eq(q, Zero(df));
       // We used to have q * C here, but that cost model seems to
       // be punishing large values more than necessary. Sqrt tries
       // to avoid large values less aggressively.
-      entropy_v = Add(Sqrt(q), entropy_v);
-      nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
+      entropy_v = Add(Sqrt(q), entropy_v); //kuantalamaa büyüklükleri (linear olmaması için sqrt)
+      nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f))); //sıfır olmayan katsayı sayısı
     }
 
     {
@@ -509,7 +512,139 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
   entropy += config.info_loss_multiplier * loss_scalar;
   return true;
 }
+// ALPCOM: Fonksiyon imzasına 3 yeni output parametresi eklendi.
+Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
+                       size_t y, const ACSConfig& config,
+                       const float* JXL_RESTRICT cmap_factors, float* block,
+                       float* full_scratch_space, uint32_t* quantized,
+                       float& entropy,
+                       // YENİ EKLENEN OUTPUT PARAMETRELERİ
+                       float& bit_cost_out,
+                       float& quant_norm_out,
+                       float& loss_scalar_out
+                       ) {
+  // entropy değişkenini, bit maliyetini biriktirmek için kullanacağız.
+  float bit_cost = 0.0f;
+  float* mem = full_scratch_space;
+  float* scratch_space = full_scratch_space + AcStrategy::kMaxCoeffArea;
+  const size_t size = (1 << acs.log2_covered_blocks()) * kDCTBlockSize;
 
+  for (size_t c = 0; c < 3; c++) {
+    float* JXL_RESTRICT block_c = block + size * c;
+    TransformFromPixels(acs.Strategy(), &config.Pixel(c, x, y),
+                        config.src_stride, block_c, scratch_space);
+  }
+  HWY_FULL(float) df;
+
+  const size_t num_blocks = acs.covered_blocks_x() * acs.covered_blocks_y();
+  float quant_norm16 = 0;
+  if (num_blocks == 1) {
+    quant_norm16 = config.Quant(x / 8, y / 8);
+  } else if (num_blocks == 2) {
+    if (acs.covered_blocks_y() == 2) {
+      quant_norm16 =
+          std::max(config.Quant(x / 8, y / 8), config.Quant(x / 8, y / 8 + 1));
+    } else {
+      quant_norm16 =
+          std::max(config.Quant(x / 8, y / 8), config.Quant(x / 8 + 1, y / 8));
+    }
+  } else {
+    for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
+      for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
+        float qval = config.Quant(x / 8 + ix, y / 8 + iy);
+        qval *= qval;
+        qval *= qval;
+        qval *= qval;
+        quant_norm16 += qval * qval;
+      }
+    }
+    quant_norm16 /= num_blocks;
+    quant_norm16 = FastPowf(quant_norm16, 1.0f / 16.0f);
+  }
+  quant_norm_out = quant_norm16; // ALPCOM: Kuantalama değerini dışarı aktar
+  const auto quant = Set(df, quant_norm16);
+
+  const HWY_CAPPED(float, 8) df8;
+  auto loss = Zero(df8);
+  for (size_t c = 0; c < 3; c++) {
+    const float* inv_matrix = config.dequant->InvMatrix(acs.Strategy(), c);
+    const float* matrix = config.dequant->Matrix(acs.Strategy(), c);
+    const auto cmap_factor = Set(df, cmap_factors[c]);
+
+    auto entropy_v = Zero(df);
+    auto nzeros_v = Zero(df);
+    for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
+      const auto in = Load(df, block + c * size + i); //renk kanalının o anki ham frekans katsayıları
+      const auto in_y = Mul(Load(df, block + size + i), cmap_factor);
+      const auto im = Load(df, inv_matrix + i); //ağırlıklar yüklenir
+      const auto val = Mul(Sub(in, in_y), Mul(im, quant));
+      const auto rval = Round(val);
+      const auto diff = Sub(val, rval);
+      const auto m = Load(df, matrix + i);
+      Store(Mul(m, diff), df, &mem[i]);
+      const auto q = Abs(rval);
+      const auto q_is_zero = Eq(q, Zero(df));
+      entropy_v = Add(Sqrt(q), entropy_v);
+      nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
+    }
+
+    {
+      float masku_lut[3] = {12.0, 0.0, 4.0};
+      auto masku_off = Set(df8, masku_lut[c]);
+      auto lossc = Zero(df8);
+      TransformToPixels(acs.Strategy(), &mem[0], block,
+                        acs.covered_blocks_x() * 8, scratch_space);
+      for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
+        for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
+          for (size_t dy = 0; dy < kBlockDim; ++dy) {
+            for (size_t dx = 0; dx < kBlockDim; dx += Lanes(df8)) {
+              auto in = Load(df8, block +
+                                      (iy * kBlockDim + dy) *
+                                          (acs.covered_blocks_x() * kBlockDim) +
+                                      ix * kBlockDim + dx);
+              if (x + ix * 8 + dx + Lanes(df8) <= config.mask1x1_xsize) {
+                auto masku =
+                    Add(Load(df8, config.MaskingPtr1x1(x + ix * 8 + dx,
+                                                       y + iy * 8 + dy)),
+                        masku_off);
+                in = Mul(masku, in);
+                in = Mul(in, in);
+                in = Mul(in, in);
+                in = Mul(in, in);
+                lossc = Add(lossc, in);
+              }
+            }
+          }
+        }
+      }
+      static const double kChannelMul[3] = {pow(8.2, 8.0), pow(1.0, 8.0),
+                                            pow(1.03, 8.0)};
+      lossc = Mul(Set(df8, kChannelMul[c]), lossc);
+      loss = Add(loss, lossc);
+    }
+    bit_cost += config.cost_delta * GetLane(SumOfLanes(df, entropy_v));
+    size_t num_nzeros = GetLane(SumOfLanes(df, nzeros_v));
+    size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1;
+    bit_cost += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits);
+    if (c == 0 && num_blocks >= 2) {
+      float w = 1.0 + std::min(3.0, num_blocks / 8.0);
+      bit_cost *= w;
+      loss = Mul(loss, Set(df8, w));
+    }
+  }
+  float loss_scalar =
+      pow(GetLane(SumOfLanes(df8, loss)) / (num_blocks * kDCTBlockSize),
+          1.0f / 8.0f) *
+      (num_blocks * kDCTBlockSize) / quant_norm16;
+
+  // ALPCOM: Çıkış parametrelerini doldur
+  bit_cost_out = bit_cost;
+  loss_scalar_out = loss_scalar;
+
+  // Nihai entropiyi (EntropyCost) hesapla
+  entropy = (bit_cost * entropy_mul) + (config.info_loss_multiplier * loss_scalar);
+  return true;
+}
 Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
                             float butteraugli_target, const ACSConfig& config,
                             const float* JXL_RESTRICT cmap_factors,
@@ -523,57 +658,33 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
     double entropy_mul;
   };
   static const TransformTry8x8 kTransforms8x8[] = {
-      {
-          AcStrategyType::DCT,
-          9,
-          0.8,
-      },
-      {
-          AcStrategyType::DCT4X4,
-          5,
-          1.08,
-      },
-      {
-          AcStrategyType::DCT2X2,
-          5,
-          0.95,
-      },
-      {
-          AcStrategyType::DCT4X8,
-          4,
-          0.85931637428340035,
-      },
-      {
-          AcStrategyType::DCT8X4,
-          4,
-          0.85931637428340035,
-      },
-      {
-          AcStrategyType::IDENTITY,
-          5,
-          1.0427542510634957,
-      },
-      {
-          AcStrategyType::AFV0,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV1,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV2,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV3,
-          4,
-          0.81779489591359944,
-      },
+      {AcStrategyType::DCT, 9, 0.8},
+      {AcStrategyType::DCT4X4, 5, 1.08},
+      {AcStrategyType::DCT2X2, 5, 0.95},
+      {AcStrategyType::DCT4X8, 4, 0.85931637428340035},
+      {AcStrategyType::DCT8X4, 4, 0.85931637428340035},
+      {AcStrategyType::IDENTITY, 5, 1.0427542510634957},
+      {AcStrategyType::AFV0, 4, 0.81779489591359944},
+      {AcStrategyType::AFV1, 4, 0.81779489591359944},
+      {AcStrategyType::AFV2, 4, 0.81779489591359944},
+      {AcStrategyType::AFV3, 4, 0.81779489591359944},
   };
+  // ALPCOM: CSV başlıKları
+  std::ofstream log_file("entropy_log.csv", std::ios::app);
+  if (log_file.tellp() == 0) {
+
+    log_file << "BlockX,BlockY,TransformType,ButteraugliTarget,"
+             << "EncodingSpeedTier,BaseEntropyMul,AdjustedEntropyMul,"
+             << "CmapFactorYtoX,CmapFactorYtoB,ConfigInfoLossMul,"
+             << "ConfigZerosMul,ConfigCostDelta,BitCost,QuantField,"
+             << "LossScalar,EntropyCost,mul8x8,EntropyEstimate\n";
+  }
+
+  static const float k8x8mul1 = -0.4;
+  static const float k8x8mul2 = 1.0;
+  static const float k8x8base = 1.4;
+  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+
   double best = 1e30;
   best_tx = kTransforms8x8[0].type;
   for (auto tx : kTransforms8x8) {
@@ -581,7 +692,9 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
       continue;
     }
     AcStrategy acs = AcStrategy::FromRawStrategy(tx.type);
+
     float entropy_mul = tx.entropy_mul / kTransforms8x8[0].entropy_mul;
+
     if ((tx.type == AcStrategyType::DCT2X2 ||
          tx.type == AcStrategyType::IDENTITY) &&
         butteraugli_target < 5.0) {
@@ -599,13 +712,43 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
       }
       entropy_mul += kAvoidEntropyOfTransforms * mul;
     }
-    float entropy;
-    JXL_RETURN_IF_ERROR(EstimateEntropy(acs, entropy_mul, x, y, config,
+
+    float entropy_cost; //ALPCOM: Nihai maliyeti tutacak (EntropyCost)
+
+    float bit_cost, quant_field, loss_scalar;
+
+    // ALPCOM: EstimateEntropyDebug çağrısı
+    JXL_RETURN_IF_ERROR(EstimateEntropyDebug(acs, entropy_mul, x, y, config,
                                         cmap_factors, block, scratch_space,
-                                        quantized, entropy));
-    if (entropy < best) {
+                                        quantized, entropy_cost,
+                                        bit_cost, quant_field, loss_scalar));
+
+    if (log_file.is_open()) {
+      const float entropy_estimate_val = entropy_cost * mul8x8;
+
+      log_file << x << ","
+               << y << ","
+               << static_cast<int>(tx.type) << ","
+               << std::fixed << std::setprecision(6) << butteraugli_target << ","
+               << encoding_speed_tier << ","
+               << tx.entropy_mul << ","
+               << entropy_mul << ","
+               << cmap_factors[0] << ","
+               << cmap_factors[2] << ","
+               << config.info_loss_multiplier << ","
+               << config.zeros_mul << ","
+               << config.cost_delta << ","
+               << bit_cost << ","       // Yeni
+               << quant_field << ","    // Yeni
+               << loss_scalar << ","    // Yeni
+               << entropy_cost << ","
+               << mul8x8 << ","
+               << entropy_estimate_val << "\n";
+    }
+
+    if (entropy_cost < best) {
       best_tx = tx.type;
-      best = entropy;
+      best = entropy_cost;
     }
   }
   *entropy_out = best;
@@ -847,6 +990,8 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   JXL_ENSURE(rect.ysize() <= 8);
   size_t tx = bx / kColorTileDimInBlocks;
   size_t ty = by / kColorTileDimInBlocks;
+
+  //ALPCOM: CFL tahmin formülü okunur. Maliyet hesabında kullanılır
   const float cmap_factors[3] = {
       cmap.base().YtoXRatio(cmap.ytox_map.ConstRow(ty)[tx]),
       0.0f,
@@ -857,13 +1002,40 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   // experiment with different combinations, but only use the best of the 8x8s
   // when DCT8X8 is specified in the tree search.
   // 8x8 transforms have 10 variants, but every larger transform is just a DCT.
+
+  //ALPCOM: Başlangıç maliyetini tutacak olan scoreboard
   float entropy_estimate[64] = {};
   // Favor all 8x8 transforms (against 16x8 and larger transforms)) at
   // low butteraugli_target distances.
+
+
+
+  //ALPCOM YOL HARİTASI
+  // 1- Her 8x8 blok için başlangıç maliyet hesabı (formül2) yap
+  // 2- Daha büyük Kare bloklar için maliyet hesapla (Ana maliyet<sağüst+sağalt... koşulu ise birleştir)
+  // 3- Birleştirilmiş bloğun son maliyetini hesapla (Maliyet*entropy_mul(ceza katsayısı))
+  // 4- Maliyetleri karşılaştır ve küçük olanı seç
+
+
+  //Formüller
+  //FORMÜL 1 Temel entropi
+  //Temel Maliyet = TemelMaliyet = (BilgiKayıpMaliyeti) + (BitMaliyeti) + SabitMaliyet
+  //BitMaliyeti = zeros_mul(config) * (ToplamKatsayıSayısı - SıfırOlmayanKatsayıSayısı(config))
+  //SabitMaliyet = cost_delta(config)
+
+  //FORMÜL 2 8X8 Bloğun başlangıç maliyeti
+  //entropy_estimate[ix, iy] = (TemelMaliyet_en_iyi_8x8) * mul8x8
+
+
+
+
+  //ALPCOM: Formül 2 optimizasyonu
   static const float k8x8mul1 = -0.4;
   static const float k8x8mul2 = 1.0;
   static const float k8x8base = 1.4;
   const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+
+
   for (size_t iy = 0; iy < rect.ysize(); iy++) {
     for (size_t ix = 0; ix < rect.xsize(); ix++) {
       float entropy = 0.0;
@@ -873,7 +1045,10 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           butteraugli_target, config, cmap_factors, ac_strategy, block,
           scratch_space, quantized, &entropy, best_of_8x8s));
       JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + ix, by + iy, best_of_8x8s));
+
+      //ALPCOM: Formül 2
       entropy_estimate[iy * 8 + ix] = entropy * mul8x8;
+
     }
   }
   // Merge when a larger transform is better than the previously

@@ -1210,6 +1210,9 @@ Status DequantMatrices::EnsureComputed(JxlMemoryManager* memory_manager,
                                        uint32_t acs_mask) {
   const QuantEncoding* library = Library();
 
+  //ALPCOM: İlk çağrıda tüm niceleme tablosunun sığabileceği kadar alan (table_storage_) ayır
+  //table_ -> niceleme içim
+  //inv_table_ -> ters niceleme
   if (!table_storage_) {
     size_t table_storage_bytes = 2 * kTotalTableSize * sizeof(float);
     JXL_ASSIGN_OR_RETURN(

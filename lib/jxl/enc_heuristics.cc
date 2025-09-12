@@ -1111,6 +1111,8 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
   SaveResidualImageAsPPM(*opsin, "residual_image.ppm");
   //------------END - DEBUG SPLINES VISU-----------------------------
 
+
+  //ALPCOM: Başlangıç quant_dc hesapla
   const float quant_dc = InitialQuantDC(cparams.butteraugli_distance);
 
   // TODO(veluca): we can now run all the code from here to FindBestQuantizer
@@ -1141,6 +1143,7 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
   // Call InitialQuantField only in Hare mode or slower. Otherwise, rely
   // on simple heuristics in FindBestAcStrategy, or set a constant for Falcon
   // mode.
+  //ALPCOM: SPEED (effort ile ters orantı) 5ten büyükse hızlı yola gir
   if (cparams.speed_tier > SpeedTier::kHare ||
       cparams.disable_perceptual_optimizations) {
     JXL_ASSIGN_OR_RETURN(initial_quant_field,
@@ -1159,6 +1162,7 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
           ImageF::Create(memory_manager, frame_dim.xsize, frame_dim.ysize));
       FillImage(masking, &initial_quant_masking1x1);
     }
+    //ALPCOM: quant_dc -> başlangıç dc değeri, q->quantfield medyan değeri (burada sabit), quant_median_absd->Kuant alanının medyan mutlak sapması
     quantizer.ComputeGlobalScaleAndQuant(quant_dc, q, 0);
   } else {
     // Call this here, as it relies on pre-gaborish values.
@@ -1166,6 +1170,8 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
     if (!frame_header.loop_filter.gab) {
       butteraugli_distance_for_iqf *= 0.62f;
     }
+
+    //ALPCOM: Başlangıç niceleme değeri belirlenir (raw quantization field)
     JXL_ASSIGN_OR_RETURN(
         initial_quant_field,
         InitialQuantField(butteraugli_distance_for_iqf, *opsin, rect, pool,
