@@ -369,26 +369,35 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
                        const float* JXL_RESTRICT cmap_factors, float* block,
                        float* full_scratch_space, uint32_t* quantized,
                        float& entropy) {
-  entropy = 0.0f;
+  entropy = 0.0f; //ALPCOM: Entropi başlangıç değeri (Her strateeji için sıfırlanır)
+  //ALPCOM: Çalışma alanı için bellek ayırma (geçici parametre)
   float* mem = full_scratch_space;
   float* scratch_space = full_scratch_space + AcStrategy::kMaxCoeffArea;
   const size_t size = (1 << acs.log2_covered_blocks()) * kDCTBlockSize;
 
   // Apply transform.
+  //ALPCOM: X Y B ayrı ayrı piksel verisinden dönüşüme uğrar (stratejiye göre) her kanalın dönüşüm sonucu block dizisine yazılır.
   for (size_t c = 0; c < 3; c++) {
+    //ALPCOM: Tek bir kanalın belleği (float dizisi)
     float* JXL_RESTRICT block_c = block + size * c;
     TransformFromPixels(acs.Strategy(), &config.Pixel(c, x, y),
                         config.src_stride, block_c, scratch_space);
   }
+  //ALCOM: Float tipi SIMD vektörü
   HWY_FULL(float) df;
 
+  //ALPCOM: 8X8 blok boyut sayısı (find8x8transform için 1)
   const size_t num_blocks = acs.covered_blocks_x() * acs.covered_blocks_y();
   // avoid large blocks when there is a lot going on in red-green.
+
+  //ALPCOM: Birden fazla 8x8 blok için kuantlama haritası optimizasyonu
   float quant_norm16 = 0;
+
+  //ALPCOM: 1 için direkt al
   if (num_blocks == 1) {
     // When it is only one 8x8, we don't need aggregation of values.
     quant_norm16 = config.Quant(x / 8, y / 8);
-  } else if (num_blocks == 2) {
+  } else if (num_blocks == 2) { //ALPCOM: Dikdörtgen blok için alt bloklardan maksimimumunu al
     // Taking max instead of 8th norm seems to work
     // better for smallest blocks up to 16x8. Jyrki couldn't get
     // improvements in trying the same for 16x16 blocks.
@@ -400,6 +409,7 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
           std::max(config.Quant(x / 8, y / 8), config.Quant(x / 8 + 1, y / 8));
     }
   } else {
+    //ALPCOM: Daha büyük bloklar için (32x32vb) alt blokların ortalamasını al
     // Load QF value, calculate empirical heuristic on masking field
     // for weighting the information loss. Information loss manifests
     // itself as ringing, and masking could hide it.
@@ -420,29 +430,37 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
   // Compute entropy.
   const HWY_CAPPED(float, 8) df8;
 
-  auto loss = Zero(df8);
-  for (size_t c = 0; c < 3; c++) {
+  auto loss = Zero(df8); //ALPCOM: Kanallar için toplam bozulma maliyetini tutacak yapı
+  for (size_t c = 0; c < 3; c++) { //ALPCOM: Her kanala özgü maliyet hesabı yapılır.
     const float* inv_matrix = config.dequant->InvMatrix(acs.Strategy(), c);
     const float* matrix = config.dequant->Matrix(acs.Strategy(), c);
     const auto cmap_factor = Set(df, cmap_factors[c]);
 
+    //ALPCOM: Yapı resetleme
     auto entropy_v = Zero(df);
     auto nzeros_v = Zero(df);
-    for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
-      const auto in = Load(df, block + c * size + i);
-      const auto in_y = Mul(Load(df, block + size + i), cmap_factor);
-      const auto im = Load(df, inv_matrix + i); //ağırlıklar yüklenir
+    for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) { //LanesDF kadar katsayı aynı anda işlenir (SIMD)
+
+      //ALPCOM: Kuantalama ve hata hesabı
+      //APLCOM: Saklanan bozulmayı hesaplar
+      // val_i = (in_i - in_yi) x im_i x quant
+      //rval_i = round(val_i)
+      //diff_i = val_i - rval_i
+      //Saklanan bozulma = diff_i x m_i
+      const auto in = Load(df, block + c * size + i); //dönüşüm sonrası elde edilen frekans katsayıları (katsayı_irenk)
+      const auto in_y = Mul(Load(df, block + size + i), cmap_factor); //y kanalından tahmin edilen değer
+      const auto im = Load(df, inv_matrix + i); //Ters kuantalama matrisinden gelen görselin önemini belirten ağırlıklar
       const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //Kuantalamaya (yuvarlamaya) hazır hale getirilmiş, ölçeklenmiş frekans katsayısı.
-      const auto rval = Round(val); //Kuantalanmış Katsayı
-      const auto diff = Sub(val, rval); //Kuantalama hatası
-      const auto m = Load(df, matrix + i); //ağırlıklar
+      const auto rval = Round(val); //Kuantalanmış Katsayı (tam sayıya dönüştürülmüş)
+      const auto diff = Sub(val, rval); //Kuantalama hatası (val-rval)
+      const auto m = Load(df, matrix + i); //Normal kuantalama matrisinden gelen ağırlıktır
       Store(Mul(m, diff), df, &mem[i]); //kuantalama*ağırlık (bozulma)
       const auto q = Abs(rval); //kuantalanmış katsayı büyüklüğü
       const auto q_is_zero = Eq(q, Zero(df));
       // We used to have q * C here, but that cost model seems to
       // be punishing large values more than necessary. Sqrt tries
       // to avoid large values less aggressively.
-      entropy_v = Add(Sqrt(q), entropy_v); //kuantalamaa büyüklükleri (linear olmaması için sqrt)
+      entropy_v = Add(Sqrt(q), entropy_v); //kuantalamaa büyüklükleri Σ sqrt(|rval|) toplayıcıda biriktirilir
       nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f))); //sıfır olmayan katsayı sayısı
     }
 
@@ -495,7 +513,7 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
     size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1;
     // Also add #bit of #bit of num_nonzeros, to estimate the ANS cost, with a
     // bias.
-    entropy += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits);
+    entropy += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits); //ALPCOM: Maliyet_İşaretleme formülü
     if (c == 0 && num_blocks >= 2) {
       // It is X channel (red-green) and we often see ringing
       // in the large blocks. Let's punish that more here.
@@ -508,6 +526,8 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
       pow(GetLane(SumOfLanes(df8, loss)) / (num_blocks * kDCTBlockSize),
           1.0f / 8.0f) *
       (num_blocks * kDCTBlockSize) / quant_norm16;
+
+  //ALPCOM: Nihai Entropi Formülü = TemelBitMaliyeti(entropy)*entropy_mul + Ölçeklenmiş Bozulma Maliyeti (Formül1)
   entropy *= entropy_mul;
   entropy += config.info_loss_multiplier * loss_scalar;
   return true;
@@ -679,12 +699,12 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
              << "ConfigZerosMul,ConfigCostDelta,BitCost,QuantField,"
              << "LossScalar,EntropyCost,mul8x8,EntropyEstimate\n";
   }
-
+  //ALPCOM: CSV için parametreler
   static const float k8x8mul1 = -0.4;
   static const float k8x8mul2 = 1.0;
   static const float k8x8base = 1.4;
   const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
-
+  //
   double best = 1e30;
   best_tx = kTransforms8x8[0].type;
   for (auto tx : kTransforms8x8) {

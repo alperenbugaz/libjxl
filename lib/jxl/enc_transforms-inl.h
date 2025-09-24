@@ -498,10 +498,11 @@ HWY_MAYBE_UNUSED void TransformFromPixels(const AcStrategyType strategy,
         HWY_ALIGN float block[4 * 8];
         ComputeScaledDCT<8, 4>()(DCTFrom(pixels + x * 4, pixels_stride), block,
                                  scratch_space);
+        //ComputedScale nasıl çalışır? DCTFrom? Pixels?
         for (size_t iy = 0; iy < 4; iy++) {
           for (size_t ix = 0; ix < 8; ix++) {
             // Store transposed.
-            coefficients[(x + iy * 2) * 8 + ix] = block[iy * 8 + ix];
+            coefficients[(x + iy * 2) * 8 + ix] = block[iy * 8 + ix];//coeff ????
           }
         }
       }
