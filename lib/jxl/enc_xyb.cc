@@ -34,8 +34,14 @@
 #include "lib/jxl/image_ops.h"
 #include "lib/jxl/memory_manager_internal.h"
 
+
+//ALPCOM
+#include <fstream>
+#include <iomanip>
 HWY_BEFORE_NAMESPACE();
 namespace jxl {
+
+
 namespace HWY_NAMESPACE {
 
 // These templates are not found via ADL.
@@ -237,6 +243,21 @@ Status ToXYB(const ColorEncoding& c_current, float intensity_target,
   if (black) JXL_ENSURE(SameSize(*image, *black));
   if (linear) JXL_ENSURE(SameSize(*image, *linear));
 
+  //ALPCOM Debug
+  static bool rgb_data_saved = false;
+  if (!rgb_data_saved) {
+    printf("Dogrusal RGB renk kanallari CSV dosyalarina kaydediliyor...\n");
+    SaveChannelToCSV("RGB_R.csv", "Kirmizi (R)", image->Plane(0).Row(0), image->xsize(),
+                      image->ysize(), image->PixelsPerRow());
+    SaveChannelToCSV("RGB_G.csv", "Yesil (G)", image->Plane(1).Row(0), image->xsize(),
+                      image->ysize(), image->PixelsPerRow());
+    SaveChannelToCSV("RGB_B.csv", "Mavi (B)", image->Plane(2).Row(0), image->xsize(),
+                      image->ysize(), image->PixelsPerRow());
+    rgb_data_saved = true;
+  }
+  //ALPCOM Debug end
+
+
   JxlMemoryManager* memory_manager = image->memory_manager();
   JXL_ENSURE(memory_manager);
 
@@ -357,6 +378,34 @@ HWY_AFTER_NAMESPACE();
 
 #if HWY_ONCE
 namespace jxl {
+
+//ALCOM: Debug
+void SaveChannelToCSV(const std::string& filename, const std::string& channel_name,
+                      const float* data, size_t xsize, size_t ysize, size_t stride) {
+  std::ofstream file(filename, std::ios::trunc);
+  if (!file.is_open()) {
+    fprintf(stderr, "HATA: Dosya acilamadi: %s\n", filename.c_str());
+    return;
+  }
+
+  file << "# Kanal: " << channel_name << "\n";
+  file << "# Boyutlar: " << xsize << " x " << ysize << "\n";
+  file << "# Format: CSV (Virgulle Ayrilmis Degerler)\n\n";
+
+  for (size_t y = 0; y < ysize; ++y) {
+    for (size_t x = 0; x < xsize; ++x) {
+      file << std::fixed << std::setprecision(8) << data[y * stride + x];
+
+      if (x < xsize - 1) {
+        file << ",";
+      }
+    }
+    file << "\n";
+  }
+  printf("Bilgi: %s dosyasina %s kanali (%zu x %zu) CSV formatinda kaydedildi.\n",
+         filename.c_str(), channel_name.c_str(), xsize, ysize);
+}
+// ALPCOM: End Debug
 HWY_EXPORT(ToXYB);
 Status ToXYB(const ColorEncoding& c_current, float intensity_target,
              const ImageF* black, ThreadPool* pool, Image3F* JXL_RESTRICT image,

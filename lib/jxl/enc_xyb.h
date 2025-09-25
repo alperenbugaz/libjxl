@@ -19,12 +19,19 @@
 #include "lib/jxl/image.h"
 
 namespace jxl {
+//ALPCOM: Debug
+
+void SaveChannelToCSV(const std::string& filename, const std::string& channel_name,
+                      const float* data, size_t xsize, size_t ysize, size_t stride);
+
+// ALPCOM: End Debug
 
 // Converts any color space to XYB in-place. If `linear` is not null, fills it
 // with a linear sRGB copy of `image`.
 Status ToXYB(const ColorEncoding& c_current, float intensity_target,
              const ImageF* black, ThreadPool* pool, Image3F* JXL_RESTRICT image,
              const JxlCmsInterface& cms, Image3F* JXL_RESTRICT linear);
+
 
 void LinearRGBRowToXYB(float* JXL_RESTRICT row0, float* JXL_RESTRICT row1,
                        float* JXL_RESTRICT row2,

@@ -40,6 +40,9 @@
 #include <fstream>
 #include <iomanip>
 
+//ALPCOM: Debug
+#include "lib/jxl/enc_xyb.h"
+
 // Some of the floating point constants in this file and in other
 // files in the libjxl project have been obtained using the
 // tools/optimizer/simplex_fork.py tool. It is a variation of
@@ -1335,6 +1338,23 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
                                          const ColorCorrelationMap& cmap,
                                          AcStrategyImage* ac_strategy,
                                          size_t thread) {
+  //ALPCOM: Debug
+  static bool xyb_data_saved = false;
+  if (!xyb_data_saved) {
+    printf("XYB renk kanallari CSV dosyalarina kaydediliyor...\n");
+    const size_t xsize = rect.xsize() * kBlockDim;
+    const size_t ysize = rect.ysize() * kBlockDim;
+
+    SaveChannelToCSV("XYB_X.csv", "X", config.src_rows[0], xsize, ysize,
+                      config.src_stride);
+    SaveChannelToCSV("XYB_Y.csv", "Y (Luma)", config.src_rows[1], xsize, ysize,
+                      config.src_stride);
+    SaveChannelToCSV("XYB_B.csv", "B", config.src_rows[2], xsize, ysize,
+                      config.src_stride);
+    xyb_data_saved = true;
+  }
+  //ALPCOM: Debug end
+
   // In Cheetah mode, use DCT8 everywhere and uniform quantization.
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
     ac_strategy->FillDCT8(rect);
