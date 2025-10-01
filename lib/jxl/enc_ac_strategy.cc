@@ -40,9 +40,19 @@
 #include <fstream>
 #include <iomanip>
 
-//ALPCOM: Debug
+//ALPCOM: DCT - KUANTALAMA CSV DEBUG
 #include "lib/jxl/enc_xyb.h"
+#include <vector>
+namespace jxl {
+// Global dosya akışlarımızı ve fonksiyonlarımızı tüm derleme birimlerine ilan ediyoruz.
+extern std::ofstream dct_coeffs_file;
+extern std::ofstream quant_map_file;
+extern std::ofstream quantized_coeffs_file;
 
+void OpenDebugDataFiles();
+void CloseDebugDataFiles();
+}
+//ALPCOM: End Debug
 // Some of the floating point constants in this file and in other
 // files in the libjxl project have been obtained using the
 // tools/optimizer/simplex_fork.py tool. It is a variation of
@@ -295,6 +305,8 @@ Status DumpAcStrategy(const AcStrategyImage& ac_strategy, size_t xsize,
 
 HWY_BEFORE_NAMESPACE();
 namespace jxl {
+
+
 namespace HWY_NAMESPACE {
 
 // These templates are not found via ADL.
@@ -453,8 +465,8 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
       const auto in = Load(df, block + c * size + i); //dönüşüm sonrası elde edilen frekans katsayıları (katsayı_irenk)
       const auto in_y = Mul(Load(df, block + size + i), cmap_factor); //y kanalından tahmin edilen değer
       const auto im = Load(df, inv_matrix + i); //Ters kuantalama matrisinden gelen görselin önemini belirten ağırlıklar
-      const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //Kuantalamaya (yuvarlamaya) hazır hale getirilmiş, ölçeklenmiş frekans katsayısı.
-      const auto rval = Round(val); //Kuantalanmış Katsayı (tam sayıya dönüştürülmüş)
+      const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //Formül (6) Kuantalamaya (yuvarlamaya) hazır hale getirilmiş, ölçeklenmiş frekans katsayısı.
+      const auto rval = Round(val); //Formül (7) Kuantalanmış Katsayı (tam sayıya dönüştürülmüş)
       const auto diff = Sub(val, rval); //Kuantalama hatası (val-rval)
       const auto m = Load(df, matrix + i); //Normal kuantalama matrisinden gelen ağırlıktır
       Store(Mul(m, diff), df, &mem[i]); //kuantalama*ağırlık (bozulma)
@@ -475,7 +487,7 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
       };
       auto masku_off = Set(df8, masku_lut[c]);
       auto lossc = Zero(df8);
-      TransformToPixels(acs.Strategy(), &mem[0], block,
+      TransformToPixels(acs.Strategy(), &mem[0], block, //ALPCOM: IDCT işlemi
                         acs.covered_blocks_x() * 8, scratch_space);
 
       for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
@@ -492,47 +504,47 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
                                                        y + iy * 8 + dy)),
                         masku_off);
                 in = Mul(masku, in);
-                in = Mul(in, in);
-                in = Mul(in, in);
-                in = Mul(in, in);
-                lossc = Add(lossc, in);
+                in = Mul(in, in); //karesi
+                in = Mul(in, in); //4.kuvveti
+                in = Mul(in, in); //8.kuvveti
+                lossc = Add(lossc, in); //lossc -> toplam sembolü
               }
             }
           }
         }
       }
       static const double kChannelMul[3] = {
-          pow(8.2, 8.0),
-          pow(1.0, 8.0),
-          pow(1.03, 8.0),
+          pow(8.2, 8.0), //X -> Hataları fazla cezalandırır
+          pow(1.0, 8.0), //Y
+          pow(1.03, 8.0), //B -> Hatalar daha az cezalandırılır
       };
       lossc = Mul(Set(df8, kChannelMul[c]), lossc);
-      loss = Add(loss, lossc);
+      loss = Add(loss, lossc); //Formül (13)
     }
-    entropy += config.cost_delta * GetLane(SumOfLanes(df, entropy_v));
+    entropy += config.cost_delta * GetLane(SumOfLanes(df, entropy_v)); //Formül (5)
     size_t num_nzeros = GetLane(SumOfLanes(df, nzeros_v));
     // Add #bit of num_nonzeros, as an estimate of the cost for encoding the
     // number of non-zeros of the block.
-    size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1;
+    size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1; //Formül (9)
     // Also add #bit of #bit of num_nonzeros, to estimate the ANS cost, with a
     // bias.
-    entropy += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits); //ALPCOM: Maliyet_İşaretleme formülü
-    if (c == 0 && num_blocks >= 2) {
+    entropy += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits); //Formül (8)
+    if (c == 0 && num_blocks >= 2) { //Formül (10)
       // It is X channel (red-green) and we often see ringing
       // in the large blocks. Let's punish that more here.
       float w = 1.0 + std::min(3.0, num_blocks / 8.0);
-      entropy *= w;
+      entropy *= w; //Formül (4)
       loss = Mul(loss, Set(df8, w));
     }
   }
   float loss_scalar =
       pow(GetLane(SumOfLanes(df8, loss)) / (num_blocks * kDCTBlockSize),
-          1.0f / 8.0f) *
-      (num_blocks * kDCTBlockSize) / quant_norm16;
+          1.0f / 8.0f)  * //Formül (11)
+      (num_blocks * kDCTBlockSize) / quant_norm16; //Formül (12)
 
-  //ALPCOM: Nihai Entropi Formülü = TemelBitMaliyeti(entropy)*entropy_mul + Ölçeklenmiş Bozulma Maliyeti (Formül1)
   entropy *= entropy_mul;
-  entropy += config.info_loss_multiplier * loss_scalar;
+  entropy += config.info_loss_multiplier * loss_scalar; //Formül (11)
+  //Formül (3)
   return true;
 }
 // ALPCOM: Fonksiyon imzasına 3 yeni output parametresi eklendi.
@@ -556,6 +568,18 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
     float* JXL_RESTRICT block_c = block + size * c;
     TransformFromPixels(acs.Strategy(), &config.Pixel(c, x, y),
                         config.src_stride, block_c, scratch_space);
+
+    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+
+    if (dct_coeffs_file.is_open()) {
+      dct_coeffs_file << x << "," << y << "," << c; // Koordinatları ve kanalı yaz
+      for (size_t i = 0; i < size; ++i) {
+        dct_coeffs_file << "," << std::fixed << std::setprecision(8) << block_c[i];
+      }
+      dct_coeffs_file << "\n";
+    }
+
+    //ALPCOM: Debug end
   }
   HWY_FULL(float) df;
 
@@ -584,6 +608,13 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
     quant_norm16 /= num_blocks;
     quant_norm16 = FastPowf(quant_norm16, 1.0f / 16.0f);
   }
+
+  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+  if (quant_map_file.is_open()) {
+    quant_map_file << x << "," << y << "," << quant_norm16 << "\n";
+  }
+  //ALPCOM: Debug End
+
   quant_norm_out = quant_norm16; // ALPCOM: Kuantalama değerini dışarı aktar
   const auto quant = Set(df, quant_norm16);
 
@@ -596,12 +627,27 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
 
     auto entropy_v = Zero(df);
     auto nzeros_v = Zero(df);
+    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+    std::vector<int32_t> quantized_coeffs_for_log;
+    quantized_coeffs_for_log.reserve(size);
+    //ALPCOM: Debug End
+
     for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
       const auto in = Load(df, block + c * size + i); //renk kanalının o anki ham frekans katsayıları
       const auto in_y = Mul(Load(df, block + size + i), cmap_factor);
       const auto im = Load(df, inv_matrix + i); //ağırlıklar yüklenir
       const auto val = Mul(Sub(in, in_y), Mul(im, quant));
       const auto rval = Round(val);
+
+      //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+      HWY_ALIGN int32_t temp_quant_vals[hwy::kMaxVectorSize / sizeof(float)];
+      const HWY_FULL(int32_t) di;
+      Store(ConvertTo(di, rval), di, temp_quant_vals);
+      for(size_t j = 0; j < Lanes(df); ++j) {
+        quantized_coeffs_for_log.push_back(temp_quant_vals[j]);
+      }
+      //ALPCOM: Debug End
+
       const auto diff = Sub(val, rval);
       const auto m = Load(df, matrix + i);
       Store(Mul(m, diff), df, &mem[i]);
@@ -610,6 +656,16 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
       entropy_v = Add(Sqrt(q), entropy_v);
       nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
     }
+    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+
+    if (quantized_coeffs_file.is_open()) {
+      quantized_coeffs_file << x << "," << y << "," << c;
+      for (const auto& coeff : quantized_coeffs_for_log) {
+        quantized_coeffs_file << "," << coeff;
+      }
+      quantized_coeffs_file << "\n";
+    }
+    //ALPCOM: Debug End
 
     {
       float masku_lut[3] = {12.0, 0.0, 4.0};
@@ -668,7 +724,7 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
   entropy = (bit_cost * entropy_mul) + (config.info_loss_multiplier * loss_scalar);
   return true;
 }
-Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
+Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
                             float butteraugli_target, const ACSConfig& config,
                             const float* JXL_RESTRICT cmap_factors,
                             AcStrategyImage* JXL_RESTRICT ac_strategy,
@@ -778,6 +834,107 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
   return true;
 }
 
+Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
+                            float butteraugli_target, const ACSConfig& config,
+                            const float* JXL_RESTRICT cmap_factors,
+                            AcStrategyImage* JXL_RESTRICT ac_strategy,
+                            float* block, float* scratch_space,
+                            uint32_t* quantized, float* entropy_out,
+                            AcStrategyType& best_tx) {
+  struct TransformTry8x8 {
+    AcStrategyType type;
+    int encoding_speed_tier_max_limit;
+    double entropy_mul;
+  };
+  static const TransformTry8x8 kTransforms8x8[] = {
+      {
+          AcStrategyType::DCT,
+          9,
+          0.8,
+      },
+      {
+          AcStrategyType::DCT4X4,
+          5,
+          1.08,
+      },
+      {
+          AcStrategyType::DCT2X2,
+          5,
+          0.95,
+      },
+      {
+          AcStrategyType::DCT4X8,
+          4,
+          0.85931637428340035,
+      },
+      {
+          AcStrategyType::DCT8X4,
+          4,
+          0.85931637428340035,
+      },
+      {
+          AcStrategyType::IDENTITY,
+          5,
+          1.0427542510634957,
+      },
+      {
+          AcStrategyType::AFV0,
+          4,
+          0.81779489591359944,
+      },
+      {
+          AcStrategyType::AFV1,
+          4,
+          0.81779489591359944,
+      },
+      {
+          AcStrategyType::AFV2,
+          4,
+          0.81779489591359944,
+      },
+      {
+          AcStrategyType::AFV3,
+          4,
+          0.81779489591359944,
+      },
+  };
+  double best = 1e30;
+  best_tx = kTransforms8x8[0].type;
+  for (auto tx : kTransforms8x8) {
+    if (tx.encoding_speed_tier_max_limit < encoding_speed_tier) {
+      continue;
+    }
+    AcStrategy acs = AcStrategy::FromRawStrategy(tx.type);
+    float entropy_mul = tx.entropy_mul / kTransforms8x8[0].entropy_mul;
+    if ((tx.type == AcStrategyType::DCT2X2 ||
+         tx.type == AcStrategyType::IDENTITY) &&
+        butteraugli_target < 5.0) {
+      static const float kFavor2X2AtHighQuality = 0.4;
+      float weight = pow((5.0f - butteraugli_target) / 5.0f, 2.0f);
+      entropy_mul -= kFavor2X2AtHighQuality * weight;
+    }
+    if ((tx.type != AcStrategyType::DCT && tx.type != AcStrategyType::DCT2X2 &&
+         tx.type != AcStrategyType::IDENTITY) &&
+        butteraugli_target > 4.0) {
+      static const float kAvoidEntropyOfTransforms = 0.5;
+      float mul = 1.0;
+      if (butteraugli_target < 12.0) {
+        mul *= (12.0 - 4.0) / (butteraugli_target - 4.0);
+      }
+      entropy_mul += kAvoidEntropyOfTransforms * mul;
+    }
+    float entropy;
+    JXL_RETURN_IF_ERROR(EstimateEntropy(acs, entropy_mul, x, y, config,
+                                        cmap_factors, block, scratch_space,
+                                        quantized, entropy));
+    if (entropy < best) {
+      best_tx = tx.type;
+      best = entropy;
+    }
+  }
+  *entropy_out = best;
+  return true;
+}
 // bx, by addresses the 64x64 block at 8x8 subresolution
 // cx, cy addresses the left, upper 8x8 block position of the candidate
 // transform.
@@ -1056,7 +1213,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   static const float k8x8mul1 = -0.4;
   static const float k8x8mul2 = 1.0;
   static const float k8x8base = 1.4;
-  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base); //Formül (2)
 
 
   for (size_t iy = 0; iy < rect.ysize(); iy++) {
@@ -1070,7 +1227,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
       JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + ix, by + iy, best_of_8x8s));
 
       //ALPCOM: Formül 2
-      entropy_estimate[iy * 8 + ix] = entropy * mul8x8;
+      entropy_estimate[iy * 8 + ix] = entropy * mul8x8; // Formül (1)
 
     }
   }
@@ -1263,12 +1420,46 @@ HWY_AFTER_NAMESPACE();
 
 #if HWY_ONCE
 namespace jxl {
+
+//ALPCOM: DCT - KUANTALAMA CSV DEBUG
+std::ofstream dct_coeffs_file;
+std::ofstream quant_map_file;
+std::ofstream quantized_coeffs_file;
+
+void OpenDebugDataFiles() {
+  dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
+  quant_map_file.open("debug_quant_map.csv", std::ios::trunc);
+  quantized_coeffs_file.open("debug_quantized_coeffs.csv", std::ios::trunc);
+
+  if (dct_coeffs_file.is_open()) {
+    dct_coeffs_file << "BlockX,BlockY,Channel,Coeffs(64)\n";
+  }
+  if (quant_map_file.is_open()) {
+    quant_map_file << "BlockX,BlockY,QuantValue\n";
+  }
+  if (quantized_coeffs_file.is_open()) {
+    quantized_coeffs_file << "BlockX,BlockY,Channel,QuantizedCoeffs(64)\n";
+  }
+}
+
+void CloseDebugDataFiles() {
+  if (dct_coeffs_file.is_open()) dct_coeffs_file.close();
+  if (quant_map_file.is_open()) quant_map_file.close();
+  if (quantized_coeffs_file.is_open()) quantized_coeffs_file.close();
+}
+
+//ALPCOM: DEBUG END
+
 HWY_EXPORT(ProcessRectACS);
 
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
                                   const ImageF& mask1x1,
                                   DequantMatrices* matrices) {
+  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+  OpenDebugDataFiles();
+  //ALPCOM: DEBUG END
+
   config.dequant = matrices;
 
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
@@ -1306,19 +1497,19 @@ Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
   //  - estimate of the number of bits that will be used by the block
   //  - information loss due to quantization
   // The following constant controls the relative weights of these components.
-  config.info_loss_multiplier = 1.2;
-  config.zeros_mul = 9.3089059022677905;
-  config.cost_delta = 10.833273317067883;
+  config.info_loss_multiplier = 1.2; // Formül (22)
+  config.zeros_mul = 9.3089059022677905; // Formül (23)
+  config.cost_delta = 10.833273317067883; // Formül (24)
 
-  static const float kBias = 0.13731742964354549;
-  const float ratio = (cparams.butteraugli_distance + kBias) / (1.0f + kBias);
+  static const float kBias = 0.13731742964354549; //Formül (18)
+  const float ratio = (cparams.butteraugli_distance + kBias) / (1.0f + kBias); //Formül (17)
 
-  static const float kPow1 = 0.33677806662454718;
-  static const float kPow2 = 0.50990926717963703;
-  static const float kPow3 = 0.36702940662370243;
-  config.info_loss_multiplier *= std::pow(ratio, kPow1);
-  config.zeros_mul *= std::pow(ratio, kPow2);
-  config.cost_delta *= std::pow(ratio, kPow3);
+  static const float kPow1 = 0.33677806662454718; // Formül (19)
+  static const float kPow2 = 0.50990926717963703; //Formül (20)
+  static const float kPow3 = 0.36702940662370243; //Formül (21)
+  config.info_loss_multiplier *= std::pow(ratio, kPow1); //Formül (14)
+  config.zeros_mul *= std::pow(ratio, kPow2); //Formül (15)
+  config.cost_delta *= std::pow(ratio, kPow3); //Formül (16)
   return true;
 }
 
@@ -1409,6 +1600,9 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
                                        frame_dim.ysize, "ac_strategy", aux_out,
                                        cparams));
   }
+  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+  CloseDebugDataFiles();
+  //ALPCOM: Debug End
 #if JXL_DEBUG_AC_STRATEGY
   {
     static bool debug_visual_saved = false;
