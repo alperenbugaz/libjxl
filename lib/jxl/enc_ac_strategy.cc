@@ -834,6 +834,177 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
   return true;
 }
 
+
+enum class MetricType { kSML, kZC, kColorfulness };
+
+AcStrategyType AcsSquare(size_t blocks) {
+  if (blocks == 2) {
+    return AcStrategyType::DCT16X16;
+  } else if (blocks == 4) {
+    return AcStrategyType::DCT32X32;
+  } else {
+    return AcStrategyType::DCT64X64;
+  }
+}
+
+AcStrategyType AcsVerticalSplit(size_t blocks) {
+  if (blocks == 2) {
+    return AcStrategyType::DCT16X8;
+  } else if (blocks == 4) {
+    return AcStrategyType::DCT32X16;
+  } else {
+    return AcStrategyType::DCT64X32;
+  }
+}
+
+AcStrategyType AcsHorizontalSplit(size_t blocks) {
+  if (blocks == 2) {
+    return AcStrategyType::DCT8X16;
+  } else if (blocks == 4) {
+    return AcStrategyType::DCT16X32;
+  } else {
+    return AcStrategyType::DCT32X64;
+  }
+}
+float ComputeTextureHomogeneityMetric(const Rect& rect, const ACSConfig& config,
+                                      MetricType metric_type) {
+  switch (metric_type) {
+    case MetricType::kSML:
+      return 8.0f;  // SML için sabit değer
+    case MetricType::kZC:
+      return 8.0f;  // ZC için sabit değer
+    case MetricType::kColorfulness:
+      return 8.0f;  // Colorfulness (M) için sabit değer
+  }
+  return 8.0f;  // Varsayılan durum
+}
+
+Status IEEAccessFindBestTransformImplementation(size_t x, size_t y,
+    size_t block_dim_in_8x8_units,
+    float r,
+    const ACSConfig& config,
+    AcStrategyImage* JXL_RESTRICT ac_strategy) {
+
+  /*       32x32                        32x32                          32x32
+   * +-----------------+          +-----------------+          +-----------------+
+   * |#################|          |########|        |          |########|        |
+   * |#####  h1  ######|          |########|        |          |## d1 ##|   d2   |
+   * |#################|          |########|        |          |########|        |
+   * |-----------------|          |## v1 ##|   v2   |          |-----------------|
+   * |                 |          |########|        |          |########|        |
+   * |       h2        |          |########|        |          |## d2 ##|   d1   |
+   * |                 |          |########|        |          |########|        |
+   * +-----------------+          +-----------------+          +-----------------+
+   * Horizontal                  Vertical                     Diagonal
+   * Partitioning                Partitioning                 Partitioning
+   */
+
+  // Procedure Partitioning L x L_Block, Butteraugli_Target)
+  //6: hM <-  max(h1, h2)
+  //7: hm <- min(h1, h2)
+  //8: vM  <- max(v1, v2)
+  //9: vm <- min(v1, v2)
+  //10: dM <- max(d1, d2)
+  //11: dm <-  min(d1, d2)
+  //12: Rh <- hM/hm
+  //13: Rv <- vM/vm
+  //14: Rd <- dM/dm
+  //15: if Rd > r
+  //16: Partition LxL block to L/2xL/2 blocks
+  //17: else
+  //18:  if Rh > Rv
+  //19: Call Procedure HorizontalPartition
+  //20: else
+  //21: Call Procedure VerticalPartition
+
+    if (block_dim_in_8x8_units <= 1) {
+    ac_strategy->Set(x, y, AcStrategyType::DCT2X2);
+    return true;
+  }
+
+  const size_t half_dim = block_dim_in_8x8_units / 2;
+  const size_t pixel_dim = block_dim_in_8x8_units * kBlockDim;
+  const size_t pixel_half_dim = half_dim * kBlockDim;
+  const size_t pix_x = x * kBlockDim;
+  const size_t pix_y = y * kBlockDim;
+
+
+
+  float d1 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x, pix_y, pixel_half_dim, pixel_half_dim), config,
+      MetricType::kSML);
+  float d2 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x + pixel_half_dim, pix_y + pixel_half_dim, pixel_half_dim,
+           pixel_half_dim),
+      config, MetricType::kSML);
+  float R_d = (d1 > d2) ? (d1 / (d2 + 1e-5f)) : (d2 / (d1 + 1e-5f));
+
+  float h1 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x, pix_y, pixel_dim, pixel_half_dim), config, MetricType::kSML);
+  float h2 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x, pix_y + pixel_half_dim, pixel_dim, pixel_half_dim), config,
+      MetricType::kSML);
+  float R_h = (h1 > h2) ? (h1 / (h2 + 1e-5f)) : (h2 / (h1 + 1e-5f));
+
+  float v1 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x, pix_y, pixel_half_dim, pixel_dim), config, MetricType::kSML);
+  float v2 = ComputeTextureHomogeneityMetric(
+      Rect(pix_x + pixel_half_dim, pix_y, pixel_half_dim, pixel_dim), config,
+      MetricType::kSML);
+  float R_v = (v1 > v2) ? (v1 / (v2 + 1e-5f)) : (v2 / (v1 + 1e-5f));
+
+
+  R_d = 0.0f;
+  R_h = r + 1.0f;
+  R_v = 0.0f;
+
+  if (R_d > r) {
+
+    IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
+    IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
+                                  ac_strategy);
+    IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
+                                  ac_strategy);
+    IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
+                                  config, ac_strategy);
+    return true;
+  }
+
+  if (R_h > R_v) {
+    if (R_h > r) {
+      ac_strategy->Set(x, y, AcsHorizontalSplit(block_dim_in_8x8_units));
+      ac_strategy->Set(x, y + half_dim,
+                       AcsHorizontalSplit(block_dim_in_8x8_units));
+
+      IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
+      IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
+                                    ac_strategy);
+      IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
+                                    ac_strategy);
+      IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
+                                    config, ac_strategy);
+    } else {
+      ac_strategy->Set(x, y, AcsSquare(block_dim_in_8x8_units));
+    }
+  } else {
+    if (R_v > r) {
+      ac_strategy->Set(x, y, AcsVerticalSplit(block_dim_in_8x8_units));
+      ac_strategy->Set(x + half_dim, y,
+                       AcsVerticalSplit(block_dim_in_8x8_units));
+
+      IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
+      IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
+                                    ac_strategy);
+      IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
+                                    ac_strategy);
+      IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
+                                    config, ac_strategy);
+    } else {
+      ac_strategy->Set(x, y, AcsSquare(block_dim_in_8x8_units));
+    }
+  }
+}
+
 Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
                             float butteraugli_target, const ACSConfig& config,
                             const float* JXL_RESTRICT cmap_factors,
@@ -987,35 +1158,7 @@ static void SetEntropyForTransform(size_t cx, size_t cy,
   entropy_estimate[cy * 8 + cx] = entropy;
 }
 
-AcStrategyType AcsSquare(size_t blocks) {
-  if (blocks == 2) {
-    return AcStrategyType::DCT16X16;
-  } else if (blocks == 4) {
-    return AcStrategyType::DCT32X32;
-  } else {
-    return AcStrategyType::DCT64X64;
-  }
-}
 
-AcStrategyType AcsVerticalSplit(size_t blocks) {
-  if (blocks == 2) {
-    return AcStrategyType::DCT16X8;
-  } else if (blocks == 4) {
-    return AcStrategyType::DCT32X16;
-  } else {
-    return AcStrategyType::DCT64X32;
-  }
-}
-
-AcStrategyType AcsHorizontalSplit(size_t blocks) {
-  if (blocks == 2) {
-    return AcStrategyType::DCT8X16;
-  } else if (blocks == 4) {
-    return AcStrategyType::DCT16X32;
-  } else {
-    return AcStrategyType::DCT32X64;
-  }
-}
 
 // The following function tries to merge smaller transforms into
 // squares and the rectangles originating from a single middle division
@@ -1413,6 +1556,35 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   return true;
 }
 
+Status ProposedProcessRectACS(const CompressParams& cparams,
+                              const ACSConfig& config, const Rect& rect,
+                              AcStrategyImage* ac_strategy) {
+  const float butteraugli_target = cparams.butteraugli_distance;
+
+  //ALPCOM : Procedure Partitioning L x L_Block, Butteraugli_Target)
+  // r <- 1.35
+  // if Butteraugli_target > 8.0
+  // r <- 1.50
+  // else if Butteraugli_target < 2.0
+  // r <- 1.20
+  float r = 1.35f;
+  if (butteraugli_target > 8.0) {
+    r = 1.50f;
+  } else if (butteraugli_target < 2.0) {
+    r = 1.20f;
+  }
+
+  // Görüntü bölgesini 32x32'lik bloklar (4x4'lük 8x8'lik birimler) halinde gez.
+  for (size_t by = rect.y0(); by < rect.y0() + rect.ysize(); by += 4) {
+    for (size_t bx = rect.x0(); bx < rect.x0() + rect.xsize(); bx += 4) {
+      // Her 32x32'lik blok için hiyerarşik bölme fonksiyonunu çağır.
+      // 'block_dim_in_8x8_units' parametresi 4'tür (32/8=4).
+      IEEAccessFindBestTransformImplementation(bx, by, 4, r, config, ac_strategy);
+    }
+  }
+  return true;
+}
+
 // NOLINTNEXTLINE(google-readability-namespace-comments)
 }  // namespace HWY_NAMESPACE
 }  // namespace jxl
@@ -1451,6 +1623,7 @@ void CloseDebugDataFiles() {
 //ALPCOM: DEBUG END
 
 HWY_EXPORT(ProcessRectACS);
+HWY_EXPORT(ProposedProcessRectACS);
 
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
@@ -1545,12 +1718,18 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
     xyb_data_saved = true;
   }
   //ALPCOM: Debug end
-
+  auto deneme = cparams.speed_tier;
+  if (cparams.speed_tier == SpeedTier::kKitten) {
+    printf("Önerilen yöntem uygulanıyor");
+    return HWY_DYNAMIC_DISPATCH(ProposedProcessRectACS)(cparams, config, rect,
+                                                        ac_strategy);
+  }
   // In Cheetah mode, use DCT8 everywhere and uniform quantization.
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
     ac_strategy->FillDCT8(rect);
     return true;
   }
+
   return HWY_DYNAMIC_DISPATCH(ProcessRectACS)(
       cparams, config, rect, cmap,
       mem.address<float>() + thread * mem_per_thread,
