@@ -54,8 +54,9 @@ extern std::ofstream quant_matrices_file;
 extern std::ofstream pre_quant_coeffs_file;
 extern std::ofstream sparsity_cost_file;
 extern std::ofstream distortion_cost_file;
-extern std::ofstream masking_field_file;
 extern std::ofstream pixel_distortion_file;
+extern std::ofstream quant_error_file;
+extern std::ofstream masking_blocks_file;
 
 void OpenDebugDataFiles();
 void CloseDebugDataFiles();
@@ -678,6 +679,9 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
 
     std::vector<float> pre_quant_coeffs_for_log;
     pre_quant_coeffs_for_log.reserve(size);
+
+    std::vector<float> quant_error_for_log;
+    quant_error_for_log.reserve(size);
     //ALPCOM: Debug End
 
     for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
@@ -709,8 +713,17 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
       const auto q_is_zero = Eq(q, Zero(df));
       entropy_v = Add(Sqrt(q), entropy_v);
       nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
+
+      //ALPCOM: Diff değeri loglama
+      HWY_ALIGN float temp_diff_vals[hwy::kMaxVectorSize / sizeof(float)];
+      Store(diff, df, temp_diff_vals);
+      for(size_t j = 0; j < Lanes(df); ++j) {
+        quant_error_for_log.push_back(temp_diff_vals[j]);
+      }
+      //ALPCOM: Debug End
     }
     //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+
     if (pre_quant_coeffs_file.is_open()) {
       pre_quant_coeffs_file << x << "," << y << "," << c
                             << "," << AcStrategyTypeToString(acs.Strategy());
@@ -727,6 +740,14 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
         quantized_coeffs_file << "," << coeff;
       }
       quantized_coeffs_file << "\n";
+    }
+    if (quant_error_file.is_open()) {
+      quant_error_file << x << "," << y << "," << c
+                       << "," << AcStrategyTypeToString(acs.Strategy());
+      for (const auto& coeff : quant_error_for_log) {
+        quant_error_file << "," << std::fixed << std::setprecision(8) << coeff;
+      }
+      quant_error_file << "\n";
     }
     //ALPCOM: Debug End
 
@@ -1959,8 +1980,9 @@ std::ofstream quant_matrices_file;
 std::ofstream pre_quant_coeffs_file;
 std::ofstream sparsity_cost_file;
 std::ofstream distortion_cost_file;
-std::ofstream masking_field_file;
 std::ofstream pixel_distortion_file;
+std::ofstream quant_error_file;
+std::ofstream masking_blocks_file;
 
 void OpenDebugDataFiles() {
   dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
@@ -1970,14 +1992,18 @@ void OpenDebugDataFiles() {
   quant_matrices_file.open("debug_quant_matrices.csv", std::ios::trunc);
   pre_quant_coeffs_file.open("debug_pre_quant_coeffs.csv", std::ios::trunc);
   distortion_cost_file.open("debug_distortion_cost.csv", std::ios::trunc);
-  masking_field_file.open("debug_masking_field.csv", std::ios::trunc);
   pixel_distortion_file.open("debug_pixel_distortion.csv", std::ios::trunc); // IDCT
-
-
+  quant_error_file.open("debug_quant_error.csv", std::ios::trunc);
+  masking_blocks_file.open("debug_masking_blocks.csv", std::ios::trunc);
+  if (masking_blocks_file.is_open()) {
+    masking_blocks_file << "BlockX,BlockY,MaskValues(64)\n";
+  }
   if (pixel_distortion_file.is_open()) {
     pixel_distortion_file << "BlockX,BlockY,Channel,TransformType,Coeffs(64)\n";
   }
-
+  if (quant_error_file.is_open()) {
+    quant_error_file << "BlockX,BlockY,Channel,TransformType,QuantError(64)\n";
+  }
   if (sparsity_cost_file.is_open()) {
     sparsity_cost_file << "BlockX,BlockY,Channel,TransformType,NumNonZeros,NBits\n";
   }
@@ -2013,7 +2039,7 @@ void CloseDebugDataFiles() {
   if (pre_quant_coeffs_file.is_open()) pre_quant_coeffs_file.close();
   if (sparsity_cost_file.is_open()) sparsity_cost_file.close();
   if (distortion_cost_file.is_open()) distortion_cost_file.close();
-  if (masking_field_file.is_open()) masking_field_file.close();
+  if (masking_blocks_file.is_open()) masking_blocks_file.close();
 }
 
 //ALPCOM: DEBUG END
@@ -2031,17 +2057,32 @@ Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
   OpenDebugDataFiles();
   //ALPCOM: DEBUG END
   // ALPCOM: Masking field - CSV
-  static bool mask_saved = false;
-  if (masking_field_file.is_open() && !mask_saved && mask1x1.xsize() > 0) {
-    for (size_t y = 0; y < mask1x1.ysize(); ++y) {
-      const float* row = mask1x1.Row(y);
-      for (size_t x = 0; x < mask1x1.xsize(); ++x) {
-        masking_field_file << std::fixed << std::setprecision(8) << row[x]
-                           << (x == mask1x1.xsize() - 1 ? "" : ",");
+  static bool mask_blocks_saved = false;
+  if (masking_blocks_file.is_open() && !mask_blocks_saved && mask1x1.xsize() > 0) {
+    const size_t xsize_blocks = DivCeil(mask1x1.xsize(), kBlockDim);
+    const size_t ysize_blocks = DivCeil(mask1x1.ysize(), kBlockDim);
+
+    for (size_t by = 0; by < ysize_blocks; ++by) {
+      for (size_t bx = 0; bx < xsize_blocks; ++bx) {
+        masking_blocks_file << bx << "," << by;
+
+        for (size_t dy = 0; dy < kBlockDim; ++dy) {
+          size_t y = by * kBlockDim + dy;
+          if (y >= mask1x1.ysize()) continue;
+          const float* row = mask1x1.Row(y);
+          for (size_t dx = 0; dx < kBlockDim; ++dx) {
+            size_t x = bx * kBlockDim + dx;
+            float val = 0.0f;
+            if (x < mask1x1.xsize()) {
+              val = row[x];
+            }
+            masking_blocks_file << "," << std::fixed << std::setprecision(8) << val;
+          }
+        }
+        masking_blocks_file << "\n";
       }
-      masking_field_file << "\n";
     }
-    mask_saved = true;
+    mask_blocks_saved = true;
   }
   // ALPCOM
   config.dequant = matrices;
