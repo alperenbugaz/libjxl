@@ -1008,7 +1008,7 @@ Status FindBestQuantization(const FrameHeader& frame_header,
     iters = kMaxButteraugliIters;
   }
   for (int i = 0; i < iters + 1; ++i) {
-    if (JXL_DEBUG_ADAPTIVE_QUANTIZATION) {
+    /*if (JXL_DEBUG_ADAPTIVE_QUANTIZATION) {
       printf("\nQuantization field:\n");
       for (size_t y = 0; y < quant_field.ysize(); ++y) {
         for (size_t x = 0; x < quant_field.xsize(); ++x) {
@@ -1016,7 +1016,7 @@ Status FindBestQuantization(const FrameHeader& frame_header,
         }
         printf("\n");
       }
-    }
+    }*/
     JXL_RETURN_IF_ERROR(quantizer.SetQuantField(initial_quant_dc, quant_field,
                                                 &raw_quant_field));
     JXL_ASSIGN_OR_RETURN(

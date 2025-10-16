@@ -41,13 +41,21 @@
 #include <iomanip>
 
 //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-#include "lib/jxl/enc_xyb.h"
+#include <iostream>
+#include <random>
 #include <vector>
+#include <mutex>
+#include "lib/jxl/enc_xyb.h"
 namespace jxl {
-// Global dosya akışlarımızı ve fonksiyonlarımızı tüm derleme birimlerine ilan ediyoruz.
 extern std::ofstream dct_coeffs_file;
-extern std::ofstream quant_map_file;
 extern std::ofstream quantized_coeffs_file;
+extern std::ofstream quant_field_file;
+extern std::ofstream quant_matrices_file;
+extern std::ofstream pre_quant_coeffs_file;
+extern std::ofstream sparsity_cost_file;
+extern std::ofstream distortion_cost_file;
+extern std::ofstream masking_field_file;
+extern std::ofstream pixel_distortion_file;
 
 void OpenDebugDataFiles();
 void CloseDebugDataFiles();
@@ -305,8 +313,6 @@ Status DumpAcStrategy(const AcStrategyImage& ac_strategy, size_t xsize,
 
 HWY_BEFORE_NAMESPACE();
 namespace jxl {
-
-
 namespace HWY_NAMESPACE {
 
 // These templates are not found via ADL.
@@ -366,7 +372,7 @@ bool MultiBlockTransformCrossesVerticalBoundary(
   while (start_y != start_y_limit &&
          !ac_strategy.ConstRow(start_y)[x].IsFirstBlock()) {
     --start_y;
-  }
+         }
 
   for (size_t y = start_y; y < end_y;) {
     AcStrategyRow row = ac_strategy.ConstRow(y);
@@ -481,10 +487,10 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
 
     {
       float masku_lut[3] = {
-          12.0,
-          0.0,
-          4.0,
-      };
+        12.0,
+        0.0,
+        4.0,
+    };
       auto masku_off = Set(df8, masku_lut[c]);
       auto lossc = Zero(df8);
       TransformToPixels(acs.Strategy(), &mem[0], block, //ALPCOM: IDCT işlemi
@@ -514,10 +520,10 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
         }
       }
       static const double kChannelMul[3] = {
-          pow(8.2, 8.0), //X -> Hataları fazla cezalandırır
-          pow(1.0, 8.0), //Y
-          pow(1.03, 8.0), //B -> Hatalar daha az cezalandırılır
-      };
+        pow(8.2, 8.0), //X -> Hataları fazla cezalandırır
+        pow(1.0, 8.0), //Y
+        pow(1.03, 8.0), //B -> Hatalar daha az cezalandırılır
+    };
       lossc = Mul(Set(df8, kChannelMul[c]), lossc);
       loss = Add(loss, lossc); //Formül (13)
     }
@@ -547,6 +553,31 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
   //Formül (3)
   return true;
 }
+std::string AcStrategyTypeToString(AcStrategyType type) {
+  switch (type) {
+    case AcStrategyType::DCT: return "DCT";
+    case AcStrategyType::IDENTITY: return "IDENTITY";
+    case AcStrategyType::DCT4X4: return "DCT4X4";
+    case AcStrategyType::DCT4X8: return "DCT4X8";
+    case AcStrategyType::DCT8X4: return "DCT8X4";
+    case AcStrategyType::DCT2X2: return "DCT2X2";
+    case AcStrategyType::DCT16X16: return "DCT16X16";
+    case AcStrategyType::DCT16X8: return "DCT16X8";
+    case AcStrategyType::DCT8X16: return "DCT8X16";
+    case AcStrategyType::DCT32X32: return "DCT32X32";
+    case AcStrategyType::DCT32X16: return "DCT32X16";
+    case AcStrategyType::DCT16X32: return "DCT16X32";
+    case AcStrategyType::DCT32X8: return "DCT32X8";
+    case AcStrategyType::DCT8X32: return "DCT8X32";
+    case AcStrategyType::AFV0: return "AFV0";
+    case AcStrategyType::AFV1: return "AFV1";
+    case AcStrategyType::AFV2: return "AFV2";
+    case AcStrategyType::AFV3: return "AFV3";
+    default: return "UNKNOWN";
+  }
+}
+
+
 // ALPCOM: Fonksiyon imzasına 3 yeni output parametresi eklendi.
 Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
                        size_t y, const ACSConfig& config,
@@ -564,15 +595,16 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
   float* scratch_space = full_scratch_space + AcStrategy::kMaxCoeffArea;
   const size_t size = (1 << acs.log2_covered_blocks()) * kDCTBlockSize;
 
+  //ALPCOM: X Y B ayrı ayrı piksel verisinden dönüşüme uğrar (stratejiye göre) her kanalın dönüşüm sonucu block dizisine yazılır.
+
   for (size_t c = 0; c < 3; c++) {
     float* JXL_RESTRICT block_c = block + size * c;
     TransformFromPixels(acs.Strategy(), &config.Pixel(c, x, y),
                         config.src_stride, block_c, scratch_space);
 
     //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-
     if (dct_coeffs_file.is_open()) {
-      dct_coeffs_file << x << "," << y << "," << c; // Koordinatları ve kanalı yaz
+      dct_coeffs_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy());
       for (size_t i = 0; i < size; ++i) {
         dct_coeffs_file << "," << std::fixed << std::setprecision(8) << block_c[i];
       }
@@ -609,20 +641,33 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
     quant_norm16 = FastPowf(quant_norm16, 1.0f / 16.0f);
   }
 
-  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-  if (quant_map_file.is_open()) {
-    quant_map_file << x << "," << y << "," << quant_norm16 << "\n";
-  }
-  //ALPCOM: Debug End
 
-  quant_norm_out = quant_norm16; // ALPCOM: Kuantalama değerini dışarı aktar
+
   const auto quant = Set(df, quant_norm16);
 
   const HWY_CAPPED(float, 8) df8;
   auto loss = Zero(df8);
+  float unmultiplied_lossc_values[3] = {0.0f, 0.0f, 0.0f};
   for (size_t c = 0; c < 3; c++) {
     const float* inv_matrix = config.dequant->InvMatrix(acs.Strategy(), c);
     const float* matrix = config.dequant->Matrix(acs.Strategy(), c);
+    if (quant_matrices_file.is_open()) {
+      quant_matrices_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy()) << ",matrix";
+      for (size_t i = 0; i < size; ++i) {
+        quant_matrices_file << "," << std::fixed << std::setprecision(8) << matrix[i];
+      }
+      quant_matrices_file << "\n";
+
+      quant_matrices_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy()) << ",inv_matrix";
+      for (size_t i = 0; i < size; ++i) {
+        quant_matrices_file << "," << std::fixed << std::setprecision(8) << inv_matrix[i];
+      }
+      quant_matrices_file << "\n";
+    }
+
+    if (quant_field_file.is_open()) {
+      quant_field_file << x << "," << y << "," << c << "," << quant_norm16 << "\n";
+    }
     const auto cmap_factor = Set(df, cmap_factors[c]);
 
     auto entropy_v = Zero(df);
@@ -630,16 +675,25 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
     //ALPCOM: DCT - KUANTALAMA CSV DEBUG
     std::vector<int32_t> quantized_coeffs_for_log;
     quantized_coeffs_for_log.reserve(size);
+
+    std::vector<float> pre_quant_coeffs_for_log;
+    pre_quant_coeffs_for_log.reserve(size);
     //ALPCOM: Debug End
 
     for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
-      const auto in = Load(df, block + c * size + i); //renk kanalının o anki ham frekans katsayıları
-      const auto in_y = Mul(Load(df, block + size + i), cmap_factor);
-      const auto im = Load(df, inv_matrix + i); //ağırlıklar yüklenir
-      const auto val = Mul(Sub(in, in_y), Mul(im, quant));
-      const auto rval = Round(val);
+      const auto in = Load(df, block + c * size + i); //frekans katsayıları
+      const auto in_y = Mul(Load(df, block + size + i), cmap_factor); //y kanalından tahmin edilen değer
+      const auto im = Load(df, inv_matrix + i); //Ters kuantalama matrisinden gelen görselin önemini belirten ağırlıklar
+      const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //ölçeklenmiş frekans katsayısı
+      const auto rval = Round(val); //Kuantalanmış Katsayı
 
       //ALPCOM: DCT - KUANTALAMA CSV DEBUG
+      HWY_ALIGN float temp_pre_quant_vals[hwy::kMaxVectorSize / sizeof(float)];
+      Store(val, df, temp_pre_quant_vals);
+      for(size_t j = 0; j < Lanes(df); ++j) {
+        pre_quant_coeffs_for_log.push_back(temp_pre_quant_vals[j]);
+      }
+
       HWY_ALIGN int32_t temp_quant_vals[hwy::kMaxVectorSize / sizeof(float)];
       const HWY_FULL(int32_t) di;
       Store(ConvertTo(di, rval), di, temp_quant_vals);
@@ -657,9 +711,18 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
       nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
     }
     //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-
+    if (pre_quant_coeffs_file.is_open()) {
+      pre_quant_coeffs_file << x << "," << y << "," << c
+                            << "," << AcStrategyTypeToString(acs.Strategy());
+      for (const auto& coeff : pre_quant_coeffs_for_log) {
+        pre_quant_coeffs_file << "," << std::fixed << std::setprecision(8) << coeff;
+      }
+      pre_quant_coeffs_file << "\n";
+    }
     if (quantized_coeffs_file.is_open()) {
-      quantized_coeffs_file << x << "," << y << "," << c;
+      quantized_coeffs_file << x << "," << y << "," << c
+                            << "," << AcStrategyTypeToString(acs.Strategy());
+
       for (const auto& coeff : quantized_coeffs_for_log) {
         quantized_coeffs_file << "," << coeff;
       }
@@ -673,6 +736,14 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
       auto lossc = Zero(df8);
       TransformToPixels(acs.Strategy(), &mem[0], block,
                         acs.covered_blocks_x() * 8, scratch_space);
+      if (pixel_distortion_file.is_open()) {
+        pixel_distortion_file << x << "," << y << "," << c
+                              << "," << AcStrategyTypeToString(acs.Strategy());
+        for (size_t i = 0; i < size; ++i) {
+          pixel_distortion_file << "," << std::fixed << std::setprecision(8) << block[i];
+        }
+        pixel_distortion_file << "\n";
+      }
       for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
         for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
           for (size_t dy = 0; dy < kBlockDim; ++dy) {
@@ -696,6 +767,7 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
           }
         }
       }
+      unmultiplied_lossc_values[c] = GetLane(SumOfLanes(df8, lossc));
       static const double kChannelMul[3] = {pow(8.2, 8.0), pow(1.0, 8.0),
                                             pow(1.03, 8.0)};
       lossc = Mul(Set(df8, kChannelMul[c]), lossc);
@@ -704,6 +776,13 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
     bit_cost += config.cost_delta * GetLane(SumOfLanes(df, entropy_v));
     size_t num_nzeros = GetLane(SumOfLanes(df, nzeros_v));
     size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1;
+
+    if (sparsity_cost_file.is_open()) {
+      sparsity_cost_file << x << "," << y << "," << c
+                         << "," << AcStrategyTypeToString(acs.Strategy())
+                         << "," << num_nzeros
+                         << "," << nbits << "\n";
+    }
     bit_cost += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits);
     if (c == 0 && num_blocks >= 2) {
       float w = 1.0 + std::min(3.0, num_blocks / 8.0);
@@ -711,11 +790,31 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
       loss = Mul(loss, Set(df8, w));
     }
   }
+  const float total_raw_loss = GetLane(SumOfLanes(df8, loss));
   float loss_scalar =
       pow(GetLane(SumOfLanes(df8, loss)) / (num_blocks * kDCTBlockSize),
           1.0f / 8.0f) *
       (num_blocks * kDCTBlockSize) / quant_norm16;
+  if (distortion_cost_file.is_open()) {
+    static const double kChannelMul[3] = {pow(8.2, 8.0), pow(1.0, 8.0),
+                                          pow(1.03, 8.0)};
+    const float final_distortion_cost = config.info_loss_multiplier * loss_scalar;
 
+    distortion_cost_file << x << "," << y << "," << AcStrategyTypeToString(acs.Strategy())
+                         << "," << std::fixed << std::setprecision(8)
+                         << unmultiplied_lossc_values[0]
+                         << "," << unmultiplied_lossc_values[1]
+                         << "," << unmultiplied_lossc_values[2]
+                         << "," << kChannelMul[0]
+                         << "," << kChannelMul[1]
+                         << "," << kChannelMul[2]
+                         << "," << total_raw_loss
+                         << "," << num_blocks * kDCTBlockSize
+                         << "," << quant_norm16
+                         << "," << loss_scalar
+                         << "," << config.info_loss_multiplier
+                         << "," << final_distortion_cost << "\n";
+  }
   // ALPCOM: Çıkış parametrelerini doldur
   bit_cost_out = bit_cost;
   loss_scalar_out = loss_scalar;
@@ -737,17 +836,17 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
     double entropy_mul;
   };
   static const TransformTry8x8 kTransforms8x8[] = {
-      {AcStrategyType::DCT, 9, 0.8},
-      {AcStrategyType::DCT4X4, 5, 1.08},
-      {AcStrategyType::DCT2X2, 5, 0.95},
-      {AcStrategyType::DCT4X8, 4, 0.85931637428340035},
-      {AcStrategyType::DCT8X4, 4, 0.85931637428340035},
-      {AcStrategyType::IDENTITY, 5, 1.0427542510634957},
-      {AcStrategyType::AFV0, 4, 0.81779489591359944},
-      {AcStrategyType::AFV1, 4, 0.81779489591359944},
-      {AcStrategyType::AFV2, 4, 0.81779489591359944},
-      {AcStrategyType::AFV3, 4, 0.81779489591359944},
-  };
+    {AcStrategyType::DCT, 9, 0.8},
+    {AcStrategyType::DCT4X4, 5, 1.08},
+    {AcStrategyType::DCT2X2, 5, 0.95},
+    {AcStrategyType::DCT4X8, 4, 0.85931637428340035},
+    {AcStrategyType::DCT8X4, 4, 0.85931637428340035},
+    {AcStrategyType::IDENTITY, 5, 1.0427542510634957},
+    {AcStrategyType::AFV0, 4, 0.81779489591359944},
+    {AcStrategyType::AFV1, 4, 0.81779489591359944},
+    {AcStrategyType::AFV2, 4, 0.81779489591359944},
+    {AcStrategyType::AFV3, 4, 0.81779489591359944},
+};
   // ALPCOM: CSV başlıKları
   std::ofstream log_file("entropy_log.csv", std::ios::app);
   if (log_file.tellp() == 0) {
@@ -780,7 +879,7 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
       static const float kFavor2X2AtHighQuality = 0.4;
       float weight = pow((5.0f - butteraugli_target) / 5.0f, 2.0f);
       entropy_mul -= kFavor2X2AtHighQuality * weight;
-    }
+        }
     if ((tx.type != AcStrategyType::DCT && tx.type != AcStrategyType::DCT2X2 &&
          tx.type != AcStrategyType::IDENTITY) &&
         butteraugli_target > 4.0) {
@@ -790,7 +889,7 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
         mul *= (12.0 - 4.0) / (butteraugli_target - 4.0);
       }
       entropy_mul += kAvoidEntropyOfTransforms * mul;
-    }
+        }
 
     float entropy_cost; //ALPCOM: Nihai maliyeti tutacak (EntropyCost)
 
@@ -807,7 +906,7 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
 
       log_file << x << ","
                << y << ","
-               << static_cast<int>(tx.type) << ","
+               << AcStrategyTypeToString(acs.Strategy())<< ","
                << std::fixed << std::setprecision(6) << butteraugli_target << ","
                << encoding_speed_tier << ","
                << tx.entropy_mul << ","
@@ -817,9 +916,9 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
                << config.info_loss_multiplier << ","
                << config.zeros_mul << ","
                << config.cost_delta << ","
-               << bit_cost << ","       // Yeni
-               << quant_field << ","    // Yeni
-               << loss_scalar << ","    // Yeni
+               << bit_cost << ","
+               << quant_field << ","
+               << loss_scalar << ","
                << entropy_cost << ","
                << mul8x8 << ","
                << entropy_estimate_val << "\n";
@@ -835,18 +934,12 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
 }
 
 
-enum class MetricType { kSML, kZC, kColorfulness };
-
 AcStrategyType AcsSquare(size_t blocks) {
-  if (blocks == 2) {
-    return AcStrategyType::DCT16X16;
-  } else if (blocks == 4) {
-    return AcStrategyType::DCT32X32;
-  } else {
-    return AcStrategyType::DCT64X64;
-  }
+  if (blocks == 1) return AcStrategyType::DCT;
+  if (blocks == 2) return AcStrategyType::DCT16X16;
+  if (blocks == 4) return AcStrategyType::DCT32X32;
+  return AcStrategyType::DCT64X64;
 }
-
 AcStrategyType AcsVerticalSplit(size_t blocks) {
   if (blocks == 2) {
     return AcStrategyType::DCT16X8;
@@ -856,7 +949,6 @@ AcStrategyType AcsVerticalSplit(size_t blocks) {
     return AcStrategyType::DCT64X32;
   }
 }
-
 AcStrategyType AcsHorizontalSplit(size_t blocks) {
   if (blocks == 2) {
     return AcStrategyType::DCT8X16;
@@ -866,144 +958,118 @@ AcStrategyType AcsHorizontalSplit(size_t blocks) {
     return AcStrategyType::DCT32X64;
   }
 }
-float ComputeTextureHomogeneityMetric(const Rect& rect, const ACSConfig& config,
-                                      MetricType metric_type) {
-  switch (metric_type) {
-    case MetricType::kSML:
-      return 8.0f;  // SML için sabit değer
-    case MetricType::kZC:
-      return 8.0f;  // ZC için sabit değer
-    case MetricType::kColorfulness:
-      return 8.0f;  // Colorfulness (M) için sabit değer
-  }
-  return 8.0f;  // Varsayılan durum
-}
-
-Status IEEAccessFindBestTransformImplementation(size_t x, size_t y,
-    size_t block_dim_in_8x8_units,
-    float r,
-    const ACSConfig& config,
-    AcStrategyImage* JXL_RESTRICT ac_strategy) {
-
-  /*       32x32                        32x32                          32x32
-   * +-----------------+          +-----------------+          +-----------------+
-   * |#################|          |########|        |          |########|        |
-   * |#####  h1  ######|          |########|        |          |## d1 ##|   d2   |
-   * |#################|          |########|        |          |########|        |
-   * |-----------------|          |## v1 ##|   v2   |          |-----------------|
-   * |                 |          |########|        |          |########|        |
-   * |       h2        |          |########|        |          |## d2 ##|   d1   |
-   * |                 |          |########|        |          |########|        |
-   * +-----------------+          +-----------------+          +-----------------+
-   * Horizontal                  Vertical                     Diagonal
-   * Partitioning                Partitioning                 Partitioning
-   */
-
-  // Procedure Partitioning L x L_Block, Butteraugli_Target)
-  //6: hM <-  max(h1, h2)
-  //7: hm <- min(h1, h2)
-  //8: vM  <- max(v1, v2)
-  //9: vm <- min(v1, v2)
-  //10: dM <- max(d1, d2)
-  //11: dm <-  min(d1, d2)
-  //12: Rh <- hM/hm
-  //13: Rv <- vM/vm
-  //14: Rd <- dM/dm
-  //15: if Rd > r
-  //16: Partition LxL block to L/2xL/2 blocks
-  //17: else
-  //18:  if Rh > Rv
-  //19: Call Procedure HorizontalPartition
-  //20: else
-  //21: Call Procedure VerticalPartition
-
-    if (block_dim_in_8x8_units <= 1) {
-    ac_strategy->Set(x, y, AcStrategyType::DCT2X2);
-    return true;
-  }
-
-  const size_t half_dim = block_dim_in_8x8_units / 2;
-  const size_t pixel_dim = block_dim_in_8x8_units * kBlockDim;
-  const size_t pixel_half_dim = half_dim * kBlockDim;
-  const size_t pix_x = x * kBlockDim;
-  const size_t pix_y = y * kBlockDim;
 
 
-
-  float d1 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x, pix_y, pixel_half_dim, pixel_half_dim), config,
-      MetricType::kSML);
-  float d2 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x + pixel_half_dim, pix_y + pixel_half_dim, pixel_half_dim,
-           pixel_half_dim),
-      config, MetricType::kSML);
-  float R_d = (d1 > d2) ? (d1 / (d2 + 1e-5f)) : (d2 / (d1 + 1e-5f));
-
-  float h1 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x, pix_y, pixel_dim, pixel_half_dim), config, MetricType::kSML);
-  float h2 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x, pix_y + pixel_half_dim, pixel_dim, pixel_half_dim), config,
-      MetricType::kSML);
-  float R_h = (h1 > h2) ? (h1 / (h2 + 1e-5f)) : (h2 / (h1 + 1e-5f));
-
-  float v1 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x, pix_y, pixel_half_dim, pixel_dim), config, MetricType::kSML);
-  float v2 = ComputeTextureHomogeneityMetric(
-      Rect(pix_x + pixel_half_dim, pix_y, pixel_half_dim, pixel_dim), config,
-      MetricType::kSML);
-  float R_v = (v1 > v2) ? (v1 / (v2 + 1e-5f)) : (v2 / (v1 + 1e-5f));
+/**
+ * @brief Sum-Modified Laplacian (SML) metriğini hesaplar.
+ * Bu metrik, piksellerin komşularıyla olan farklarının toplamını alarak
+ * bir bölgedeki kenar ve doku yoğunluğunu ölçer.
+ * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
+ * @param config Görüntü verilerine erişim sağlayan yapı.
+ * @return Bölgenin SML skorunu döndürür. Yüksek skor, yüksek doku yoğunluğuna işaret eder.
+ */
 
 
-  R_d = 0.0f;
-  R_h = r + 1.0f;
-  R_v = 0.0f;
-
-  if (R_d > r) {
-
-    IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
-    IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
-                                  ac_strategy);
-    IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
-                                  ac_strategy);
-    IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
-                                  config, ac_strategy);
-    return true;
-  }
-
-  if (R_h > R_v) {
-    if (R_h > r) {
-      ac_strategy->Set(x, y, AcsHorizontalSplit(block_dim_in_8x8_units));
-      ac_strategy->Set(x, y + half_dim,
-                       AcsHorizontalSplit(block_dim_in_8x8_units));
-
-      IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
-      IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
-                                    ac_strategy);
-      IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
-                                    ac_strategy);
-      IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
-                                    config, ac_strategy);
-    } else {
-      ac_strategy->Set(x, y, AcsSquare(block_dim_in_8x8_units));
-    }
-  } else {
-    if (R_v > r) {
-      ac_strategy->Set(x, y, AcsVerticalSplit(block_dim_in_8x8_units));
-      ac_strategy->Set(x + half_dim, y,
-                       AcsVerticalSplit(block_dim_in_8x8_units));
-
-      IEEAccessFindBestTransformImplementation(x, y, half_dim, r, config, ac_strategy);
-      IEEAccessFindBestTransformImplementation(x, y + half_dim, half_dim, r, config,
-                                    ac_strategy);
-      IEEAccessFindBestTransformImplementation(x + half_dim, y, half_dim, r, config,
-                                    ac_strategy);
-      IEEAccessFindBestTransformImplementation(x + half_dim, y + half_dim, half_dim, r,
-                                    config, ac_strategy);
-    } else {
-      ac_strategy->Set(x, y, AcsSquare(block_dim_in_8x8_units));
+float CalculateSML(const Rect& rect, const ACSConfig& config) {
+  float sum = 0.0f;
+  const float* y_plane = config.src_rows[1];
+  const size_t stride = config.src_stride;
+  if (rect.x0() + rect.xsize() > config.xsize ||
+      rect.y0() + rect.ysize() > config.ysize || rect.xsize() < 2 ||
+      rect.ysize() < 2) {
+    return 0.0f;
+      }
+  for (size_t y = 1; y < rect.ysize(); ++y) {
+    const float* JXL_RESTRICT c_row =
+        y_plane + (rect.y0() + y) * stride + rect.x0();
+    for (size_t x = 1; x < rect.xsize(); ++x) {
+      const float laplacian =
+          std::abs(2 * c_row[x] - c_row[x - 1] - c_row[x - stride]);
+      sum += laplacian;
     }
   }
+  const size_t num_pixels = rect.xsize() * rect.ysize();
+  return (num_pixels == 0) ? 0.0f : sum / num_pixels;
 }
+/**
+ * @brief Zero-Crossing (ZC) metriğini hesaplar.
+ * Piksel değerlerinin sıfır (veya bir eşik) etrafında ne sıklıkla işaret
+ * değiştirdiğini sayarak doku frekansını ölçer.
+ * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
+ * @param config Görüntü verilerine erişim sağlayan yapı.
+ * @return Bölgenin ZC skorunu döndürür.
+ */
+float CalculateZC(const Rect& rect, const ACSConfig& config) {
+  float crossings = 0.0f;
+  const float* y_plane = config.src_rows[1];
+  const size_t stride = config.src_stride;
+  if (rect.x0() + rect.xsize() >= config.xsize ||
+      rect.y0() + rect.ysize() >= config.ysize) {
+    return 0.0f;
+      }
+  for (size_t y = 0; y < rect.ysize() - 1; ++y) {
+    const float* JXL_RESTRICT c_row =
+        y_plane + (rect.y0() + y) * stride + rect.x0();
+    for (size_t x = 0; x < rect.xsize() - 1; ++x) {
+      if ((c_row[x] > 0 && c_row[x + 1] < 0) ||
+          (c_row[x] < 0 && c_row[x + 1] > 0)) {
+        crossings++;
+          }
+      if ((c_row[x] > 0 && c_row[x + stride] < 0) ||
+          (c_row[x] < 0 && c_row[x + stride] > 0)) {
+        crossings++;
+          }
+    }
+  }
+  const size_t num_pixels = rect.xsize() * rect.ysize();
+  return (num_pixels == 0) ? 0.0f : crossings / num_pixels;
+}
+
+/**
+ * @brief Colorfulness (Renklilik) metriğini hesaplar.
+ * Bir bölgedeki renklerin ne kadar canlı ve doygun olduğunu ölçer. XYB renk
+ * uzayında, X (kırmızı-yeşil) ve B (sarı-mavi) kanallarının ortalaması ve
+ * standart sapması kullanılarak hesaplanır.
+ * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
+ * @param config Görüntü verilerine erişim sağlayan yapı.
+ * @return Bölgenin renklilik skorunu döndürür.
+ */
+float CalculateColorfulness(const Rect& rect, const ACSConfig& config) {
+  float sum_x = 0, sum_b = 0;
+  float sum_sq_x = 0, sum_sq_b = 0;
+  const float* x_plane = config.src_rows[0];
+  const float* b_plane = config.src_rows[2];
+  const size_t stride = config.src_stride;
+  const size_t num_pixels = rect.xsize() * rect.ysize();
+  if (num_pixels == 0) return 0.0f;
+  if (rect.x0() + rect.xsize() > config.xsize ||
+      rect.y0() + rect.ysize() > config.ysize) {
+    return 0.0f;
+      }
+  for (size_t y = 0; y < rect.ysize(); ++y) {
+    const float* JXL_RESTRICT row_x =
+        x_plane + (rect.y0() + y) * stride + rect.x0();
+    const float* JXL_RESTRICT row_b =
+        b_plane + (rect.y0() + y) * stride + rect.x0();
+    for (size_t x = 0; x < rect.xsize(); ++x) {
+      sum_x += row_x[x];
+      sum_b += row_b[x];
+      sum_sq_x += row_x[x] * row_x[x];
+      sum_sq_b += row_b[x] * row_b[x];
+    }
+  }
+  float mean_x = sum_x / num_pixels;
+  float mean_b = sum_b / num_pixels;
+  float std_x = std::sqrt(sum_sq_x / num_pixels - mean_x * mean_x);
+  float std_b = std::sqrt(sum_sq_b / num_pixels - mean_b * mean_b);
+  return std::sqrt(std_x * std_x + std_b * std_b) +
+         0.3f * std::sqrt(mean_x * mean_x + mean_b * mean_b);
+}
+
+
+
+
+
 
 Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
                             float butteraugli_target, const ACSConfig& config,
@@ -1018,57 +1084,57 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
     double entropy_mul;
   };
   static const TransformTry8x8 kTransforms8x8[] = {
-      {
-          AcStrategyType::DCT,
-          9,
-          0.8,
-      },
-      {
-          AcStrategyType::DCT4X4,
-          5,
-          1.08,
-      },
-      {
-          AcStrategyType::DCT2X2,
-          5,
-          0.95,
-      },
-      {
-          AcStrategyType::DCT4X8,
-          4,
-          0.85931637428340035,
-      },
-      {
-          AcStrategyType::DCT8X4,
-          4,
-          0.85931637428340035,
-      },
-      {
-          AcStrategyType::IDENTITY,
-          5,
-          1.0427542510634957,
-      },
-      {
-          AcStrategyType::AFV0,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV1,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV2,
-          4,
-          0.81779489591359944,
-      },
-      {
-          AcStrategyType::AFV3,
-          4,
-          0.81779489591359944,
-      },
-  };
+    {
+      AcStrategyType::DCT,
+      9,
+      0.8,
+  },
+  {
+    AcStrategyType::DCT4X4,
+    5,
+    1.08,
+},
+{
+  AcStrategyType::DCT2X2,
+  5,
+  0.95,
+},
+{
+  AcStrategyType::DCT4X8,
+  4,
+  0.85931637428340035,
+},
+{
+  AcStrategyType::DCT8X4,
+  4,
+  0.85931637428340035,
+},
+{
+  AcStrategyType::IDENTITY,
+  5,
+  1.0427542510634957,
+},
+{
+  AcStrategyType::AFV0,
+  4,
+  0.81779489591359944,
+},
+{
+  AcStrategyType::AFV1,
+  4,
+  0.81779489591359944,
+},
+{
+  AcStrategyType::AFV2,
+  4,
+  0.81779489591359944,
+},
+{
+  AcStrategyType::AFV3,
+  4,
+  0.81779489591359944,
+},
+};
   double best = 1e30;
   best_tx = kTransforms8x8[0].type;
   for (auto tx : kTransforms8x8) {
@@ -1083,7 +1149,7 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
       static const float kFavor2X2AtHighQuality = 0.4;
       float weight = pow((5.0f - butteraugli_target) / 5.0f, 2.0f);
       entropy_mul -= kFavor2X2AtHighQuality * weight;
-    }
+        }
     if ((tx.type != AcStrategyType::DCT && tx.type != AcStrategyType::DCT2X2 &&
          tx.type != AcStrategyType::IDENTITY) &&
         butteraugli_target > 4.0) {
@@ -1093,7 +1159,7 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
         mul *= (12.0 - 4.0) / (butteraugli_target - 4.0);
       }
       entropy_mul += kAvoidEntropyOfTransforms * mul;
-    }
+        }
     float entropy;
     JXL_RETURN_IF_ERROR(EstimateEntropy(acs, entropy_mul, x, y, config,
                                         cmap_factors, block, scratch_space,
@@ -1197,7 +1263,7 @@ Status FindBestFirstLevelDivisionForSquare(
       MultiBlockTransformCrossesVerticalBoundary(*ac_strategy, bx + cx + blocks,
                                                  by + cy, by + cy + blocks)) {
     return true;  // not suitable for JxJ analysis, some transforms leak out.
-  }
+                                                 }
   // For floating transforms there may be
   // already blocks selected that make either or both JXK and
   // KXJ not feasible for this location.
@@ -1316,10 +1382,10 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
 
   //ALPCOM: CFL tahmin formülü okunur. Maliyet hesabında kullanılır
   const float cmap_factors[3] = {
-      cmap.base().YtoXRatio(cmap.ytox_map.ConstRow(ty)[tx]),
-      0.0f,
-      cmap.base().YtoBRatio(cmap.ytob_map.ConstRow(ty)[tx]),
-  };
+    cmap.base().YtoXRatio(cmap.ytox_map.ConstRow(ty)[tx]),
+    0.0f,
+    cmap.base().YtoBRatio(cmap.ytob_map.ConstRow(ty)[tx]),
+};
   if (cparams.speed_tier > SpeedTier::kHare) return true;
   // First compute the best 8x8 transform for each square. Later, we do not
   // experiment with different combinations, but only use the best of the 8x8s
@@ -1363,7 +1429,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
     for (size_t ix = 0; ix < rect.xsize(); ix++) {
       float entropy = 0.0;
       AcStrategyType best_of_8x8s;
-      JXL_RETURN_IF_ERROR(FindBest8x8Transform(
+      JXL_RETURN_IF_ERROR(FindBest8x8TransformDebug(
           8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
           butteraugli_target, config, cmap_factors, ac_strategy, block,
           scratch_space, quantized, &entropy, best_of_8x8s));
@@ -1403,19 +1469,19 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   // e.g. by not applying the multiplier when storing the new entropy
   // estimates in TryMergeToACSCandidate().
   const MergeTry kTransformsForMerge[9] = {
-      {AcStrategyType::DCT16X8, 2, 4, 5, entropy_mul16X8},
-      {AcStrategyType::DCT8X16, 2, 4, 5, entropy_mul16X8},
-      // FindBestFirstLevelDivisionForSquare looks for DCT16X16 and its
-      // subdivisions. {AcStrategyType::DCT16X16, 3, entropy_mul16X16},
-      {AcStrategyType::DCT16X32, 4, 4, 4, entropy_mul16X32},
-      {AcStrategyType::DCT32X16, 4, 4, 4, entropy_mul16X32},
-      // FindBestFirstLevelDivisionForSquare looks for DCT32X32 and its
-      // subdivisions. {AcStrategyType::DCT32X32, 5, 1, 5,
-      // 0.9822994906548809f},
-      {AcStrategyType::DCT64X32, 6, 1, 3, entropy_mul64X32},
-      {AcStrategyType::DCT32X64, 6, 1, 3, entropy_mul64X32},
-      // {AcStrategyType::DCT64X64, 8, 1, 3, 2.0846542128012948f},
-  };
+    {AcStrategyType::DCT16X8, 2, 4, 5, entropy_mul16X8},
+    {AcStrategyType::DCT8X16, 2, 4, 5, entropy_mul16X8},
+    // FindBestFirstLevelDivisionForSquare looks for DCT16X16 and its
+    // subdivisions. {AcStrategyType::DCT16X16, 3, entropy_mul16X16},
+    {AcStrategyType::DCT16X32, 4, 4, 4, entropy_mul16X32},
+    {AcStrategyType::DCT32X16, 4, 4, 4, entropy_mul16X32},
+    // FindBestFirstLevelDivisionForSquare looks for DCT32X32 and its
+    // subdivisions. {AcStrategyType::DCT32X32, 5, 1, 5,
+    // 0.9822994906548809f},
+    {AcStrategyType::DCT64X32, 6, 1, 3, entropy_mul64X32},
+    {AcStrategyType::DCT32X64, 6, 1, 3, entropy_mul64X32},
+    // {AcStrategyType::DCT64X64, 8, 1, 3, 2.0846542128012948f},
+};
   /*
   These sizes not yet included in merge heuristic:
   set(AcStrategyType::DCT32X8, 0.0f, 2.261390410971102f);
@@ -1453,19 +1519,19 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
                   scratch_space, quantized));
             }
             continue;
-          } else if (mt.type == AcStrategyType::DCT32X16) {
-            // We handled both DCT8X16 and DCT16X8 at the same time,
-            // and that is above. The last column and last row,
-            // when the last column or last row is odd numbered,
-            // are still handled by TryMergeAcs.
-            continue;
-          }
+              } else if (mt.type == AcStrategyType::DCT32X16) {
+                // We handled both DCT8X16 and DCT16X8 at the same time,
+                // and that is above. The last column and last row,
+                // when the last column or last row is odd numbered,
+                // are still handled by TryMergeAcs.
+                continue;
+              }
         }
         if ((mt.type == AcStrategyType::DCT16X32 && cy % 4 != 0) ||
             (mt.type == AcStrategyType::DCT32X16 && cx % 4 != 0)) {
           // already covered by FindBest32X32
           continue;
-        }
+            }
 
         if (cy + 3 < rect.ysize() && cx + 3 < rect.xsize()) {
           if (mt.type == AcStrategyType::DCT16X32) {
@@ -1489,7 +1555,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
             (mt.type == AcStrategyType::DCT32X16 && cx % 4 != 0)) {
           // already covered by FindBest32X32
           continue;
-        }
+            }
         if (cy + 1 < rect.ysize() && cx + 1 < rect.xsize()) {
           if (mt.type == AcStrategyType::DCT8X16) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
@@ -1512,7 +1578,7 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
             (mt.type == AcStrategyType::DCT16X8 && cx % 2 == 1)) {
           // already covered by FindBestFirstLevelDivisionForSquare
           continue;
-        }
+            }
         // All other merge sizes are handled here.
         // Some of the DCT16X8s and DCT8X16s will still leak through here
         // when there is an odd number of 8x8 blocks, then the last row
@@ -1522,8 +1588,8 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
             TryMergeAcs(mt.type, bx, by, cx, cy, config, cmap_factors,
                         ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
                         entropy_estimate, block, scratch_space, quantized));
-      }
-    }
+           }
+         }
   }
   if (cparams.speed_tier >= SpeedTier::kHare) {
     return true;
@@ -1556,35 +1622,327 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   return true;
 }
 
-Status ProposedProcessRectACS(const CompressParams& cparams,
-                              const ACSConfig& config, const Rect& rect,
-                              AcStrategyImage* ac_strategy) {
-  const float butteraugli_target = cparams.butteraugli_distance;
 
-  //ALPCOM : Procedure Partitioning L x L_Block, Butteraugli_Target)
-  // r <- 1.35
-  // if Butteraugli_target > 8.0
-  // r <- 1.50
-  // else if Butteraugli_target < 2.0
-  // r <- 1.20
-  float r = 1.35f;
-  if (butteraugli_target > 8.0) {
-    r = 1.50f;
-  } else if (butteraugli_target < 2.0) {
-    r = 1.20f;
+static inline Status TrySetAcsSafe(AcStrategyImage* acs,
+                                   const Rect& rect_in,
+                                   size_t bx, size_t by,
+                                   AcStrategyType t) {
+  const AcStrategy s = AcStrategy::FromRawStrategy(t);
+
+  // 1) Tüm resim sınırı (8×8 blok grid)
+  if (bx + s.covered_blocks_x() > acs->xsize()) return false;
+  if (by + s.covered_blocks_y() > acs->ysize()) return false;
+
+  // 2) Bu 64×64 rect’in sınırı
+  const size_t rx0 = rect_in.x0(), ry0 = rect_in.y0();
+  const size_t rx1 = rx0 + rect_in.xsize();
+  const size_t ry1 = ry0 + rect_in.ysize();
+  if (bx < rx0 || by < ry0) return false;
+  if (bx + s.covered_blocks_x() > rx1) return false;
+  if (by + s.covered_blocks_y() > ry1) return false;
+
+  return acs->Set(bx, by, t);
+}
+
+
+Status PartitionOne(size_t bx, size_t by, float r, const ACSConfig& cfg,
+                    AcStrategyImage* acs) {
+  std::cout << "alt rect " << "x: " <<bx <<" y: "<<by <<std::endl;
+
+  constexpr size_t k = kBlockDim;
+  const size_t px = bx * k, py = by * k;
+  constexpr size_t side = 32, half = 16;
+  const Rect top(px, py, side, half), bot(px, py + half, side, half);
+  const Rect lef(px, py, half, side), rig(px + half, py, half, side);
+  const Rect tl(px, py, half, half), tr(px + half, py, half, half);
+  const Rect bl(px, py + half, half, half), br(px + half, py + half, half, half);
+
+  const float h1 = CalculateSML(top, cfg);
+  const float h2 = CalculateSML(bot, cfg);
+  const float v1 = CalculateSML(lef, cfg);
+  const float v2 = CalculateSML(rig, cfg);
+  const float d1 = CalculateSML(tl, cfg) + CalculateSML(br, cfg);
+  const float d2 = CalculateSML(tr, cfg) + CalculateSML(bl, cfg);
+
+  auto ratio = [](float a, float b) {
+    const float mn = std::min(a, b), mx = std::max(a, b);
+    return (mn > 1e-6f) ? (mx / mn) : 1.0f;
+  };
+
+  // const float Rh = ratio(h1, h2);
+  // const float Rv = ratio(v1, v2);
+  // const float Rd = ratio(d1, d2);
+
+
+  // static std::random_device rd;
+  // static std::mt19937 gen(rd());
+  // static std::uniform_real_distribution<float> distrib(0.1f, 2.0f);
+  // const float Rd = distrib(gen);
+  // const float Rh = distrib(gen);
+  // const float Rv = distrib(gen);
+
+
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_real_distribution<float> U01(0.0f, 1.0f);
+  static std::uniform_real_distribution<float> U_0p1_2p0(0.1f, 2.0f);
+
+  // Rd'yi düşük değerlere biasla (çoğu kez r'nin altında olur)
+  const float Rd = 0.1f + std::pow(U01(gen), 3.0f) * (2.0f - 0.1f);
+
+  // Rh ve Rv'yi aynı kovaya kuantize ederek eşitlik ihtimalini çok yükselt
+  auto quantize = [](float x, float step) {
+    return std::round(x / step) * step;
+  };
+  const float step = 0.05f;                 // daha büyük step = daha sık eşitlik
+  const float base = U_0p1_2p0(gen);
+  const float Rh   = quantize(base, step);
+  const float Rv   = quantize(U_0p1_2p0(gen), step); // çoğu zaman Rh == Rv olur
+
+  if (Rd > r) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by + 2, AcStrategyType::DCT16X16);
+  } else if (Rh > Rv) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT32X16);
+
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X16);
+
+    if (!TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx, by, AcStrategyType::DCT32X16)) {
+      std::cerr << "Failed to set TOP half at (" << bx << "," << by << ")\n";
+    }
+    if (!TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx, by + 2, AcStrategyType::DCT32X16)) {
+      std::cerr << "Failed to set BOTTOM half at (" << bx << "," << by + 2 << ")\n";
+    }
+  } else if (Rv > Rh) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X32);
+
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X32);
+  } else {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X32);
   }
 
-  // Görüntü bölgesini 32x32'lik bloklar (4x4'lük 8x8'lik birimler) halinde gez.
-  for (size_t by = rect.y0(); by < rect.y0() + rect.ysize(); by += 4) {
-    for (size_t bx = rect.x0(); bx < rect.x0() + rect.xsize(); bx += 4) {
-      // Her 32x32'lik blok için hiyerarşik bölme fonksiyonunu çağır.
-      // 'block_dim_in_8x8_units' parametresi 4'tür (32/8=4).
-      IEEAccessFindBestTransformImplementation(bx, by, 4, r, config, ac_strategy);
+  return true;
+}
+
+Status ProposedProcessRectACS(const CompressParams& cparams,
+                              const ACSConfig& config, const Rect& rect_in,
+                              AcStrategyImage* acs) {
+  const float ba = cparams.butteraugli_distance;
+  float r = 1.35f;
+  if (ba > 8.0f)
+    r = 1.50f;
+  else if (ba < 2.0f)
+    r = 1.20f;
+
+  acs->FillDCT8(rect_in);
+
+  const size_t x0 = rect_in.x0();
+  const size_t y0 = rect_in.y0();
+  const size_t xsize = rect_in.xsize();
+  const size_t ysize = rect_in.ysize();
+
+  std::cout << "rect " << "x: " <<x0 <<" y: "<<y0 <<std::endl;
+  std::cout << "rect " << "yatay blok sayısı: " <<xsize <<" dikey blok sayısı: "<<ysize <<std::endl;
+
+
+  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
+    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
+      PartitionOne(x0 + ix, y0 + iy, r, config, acs);
     }
   }
   return true;
 }
 
+
+
+
+Status PartitionOneBase(size_t bx, size_t by, float r, const ACSConfig& cfg,
+                    AcStrategyImage* acs) {
+  std::cout << "alt rect " << "x: " <<bx <<" y: "<<by <<std::endl;
+
+  constexpr size_t k = kBlockDim;
+  const size_t px = bx * k, py = by * k;
+  constexpr size_t side = 32, half = 16;
+  const Rect top(px, py, side, half), bot(px, py + half, side, half);
+  const Rect lef(px, py, half, side), rig(px + half, py, half, side);
+  const Rect tl(px, py, half, half), tr(px + half, py, half, half);
+  const Rect bl(px, py + half, half, half), br(px + half, py + half, half, half);
+
+  const float h1 = CalculateSML(top, cfg);
+  const float h2 = CalculateSML(bot, cfg);
+  const float v1 = CalculateSML(lef, cfg);
+  const float v2 = CalculateSML(rig, cfg);
+  const float d1 = CalculateSML(tl, cfg) + CalculateSML(br, cfg);
+  const float d2 = CalculateSML(tr, cfg) + CalculateSML(bl, cfg);
+
+  auto ratio = [](float a, float b) {
+    const float mn = std::min(a, b), mx = std::max(a, b);
+    return (mn > 1e-6f) ? (mx / mn) : 1.0f;
+  };
+
+  // const float Rh = ratio(h1, h2);
+  // const float Rv = ratio(v1, v2);
+  // const float Rd = ratio(d1, d2);
+
+
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_real_distribution<float> distrib(1.0f, 2.0f);
+  const float Rd = distrib(gen);
+  const float Rh = distrib(gen);
+  const float Rv = distrib(gen);
+
+
+  if (Rd > r) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT16X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by + 2, AcStrategyType::DCT16X16);
+  } else if (Rh > Rv) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X16);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT32X16);
+  } else if (Rv > Rh) {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X32);
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X32);
+  } else {
+    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X32);
+  }
+
+  return true;
+}
+
+Status ProposedProcessRectACSBase(const CompressParams& cparams,
+                              const ACSConfig& config, const Rect& rect_in,
+                              AcStrategyImage* acs) {
+  const float ba = cparams.butteraugli_distance;
+  float r = 1.35f;
+  if (ba > 8.0f)
+    r = 1.50f;
+  else if (ba < 2.0f)
+    r = 1.20f;
+
+  acs->FillDCT8(rect_in);
+
+  const size_t x0 = rect_in.x0();
+  const size_t y0 = rect_in.y0();
+  const size_t xsize = rect_in.xsize();
+  const size_t ysize = rect_in.ysize();
+
+  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
+    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
+      PartitionOneBase(x0 + ix, y0 + iy, r, config, acs);
+    }
+  }
+  return true;
+}
+
+
+static inline Status TrySetAcsSafe2(AcStrategyImage* acs,
+                                   const Rect& rect_in,
+                                   size_t bx, size_t by,
+                                   AcStrategyType t) {
+  const AcStrategy s = AcStrategy::FromRawStrategy(t);
+
+  // 1) Tüm resim sınırı (8x8 blok gridi) kontrolü
+  if (bx + s.covered_blocks_x() > acs->xsize()) return false;
+  if (by + s.covered_blocks_y() > acs->ysize()) return false;
+
+  // 2) Mevcut 64x64'lük rect_in'in sınırları kontrolü
+  const size_t rx0 = rect_in.x0(), ry0 = rect_in.y0();
+  const size_t rx1 = rx0 + rect_in.xsize();
+  const size_t ry1 = ry0 + rect_in.ysize();
+  if (bx < rx0 || by < ry0) return false;
+  if (bx + s.covered_blocks_x() > rx1) return false;
+  if (by + s.covered_blocks_y() > ry1) return false;
+
+  // Sınırlar uygunsa stratejiyi ayarla.
+  return acs->Set(bx, by, t);
+}
+
+
+Status PartitionOne2(size_t bx, size_t by, const Rect& rect_in,
+                     const ACSConfig& cfg, AcStrategyImage* acs) {
+  constexpr size_t k = kBlockDim;
+  const size_t px = bx * k, py = by * k;
+
+
+  const Rect full(px, py, 32, 32);
+  const Rect top(px, py, 32, 16), bot(px, py + 16, 32, 16);
+  const Rect lef(px, py, 16, 32), rig(px + 16, py, 16, 32);
+  const Rect tl(px, py, 16, 16), tr(px + 16, py, 16, 16);
+  const Rect bl(px, py + 16, 16, 16), br(px + 16, py + 16, 16, 16);
+
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  static std::uniform_real_distribution<float> distrib(0.0f, 100.0f);
+
+
+  const float cost_32x32 = distrib(gen);
+  const float cost_h     = distrib(gen); // Yatay bölme
+  const float cost_v     = distrib(gen); // Dikey bölme
+  const float cost_q     = distrib(gen); // Çeyrek bölme
+  float min_cost = cost_32x32;
+  AcStrategyType best_strategy = AcStrategyType::DCT32X32;
+
+  if (cost_h < min_cost) {
+    min_cost = cost_h;
+    best_strategy = AcStrategyType::DCT32X16;
+  }
+  if (cost_v < min_cost) {
+    min_cost = cost_v;
+    best_strategy = AcStrategyType::DCT16X32;
+  }
+  if (cost_q < min_cost) {
+    min_cost = cost_q;
+    best_strategy = AcStrategyType::DCT16X16;
+  }
+
+  switch (best_strategy) {
+    case AcStrategyType::DCT32X32:
+      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT32X32);
+      break;
+    case AcStrategyType::DCT32X16:
+      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT32X16);
+      TrySetAcsSafe2(acs, rect_in, bx, by + 2, AcStrategyType::DCT32X16);
+      break;
+    case AcStrategyType::DCT16X32:
+      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT16X32);
+      TrySetAcsSafe2(acs, rect_in, bx + 2, by, AcStrategyType::DCT16X32);
+      break;
+    case AcStrategyType::DCT16X16:
+      TrySetAcsSafe2(acs, rect_in, bx,     by,     AcStrategyType::DCT16X16);
+      TrySetAcsSafe2(acs, rect_in, bx + 2, by,     AcStrategyType::DCT16X16);
+      TrySetAcsSafe2(acs, rect_in, bx,     by + 2, AcStrategyType::DCT16X16);
+      TrySetAcsSafe2(acs, rect_in, bx + 2, by + 2, AcStrategyType::DCT16X16);
+      break;
+    default:
+      break;
+  }
+
+  return true;
+}
+
+
+Status ProposedProcessRectACS2(const CompressParams& cparams,
+                               const ACSConfig& config, const Rect& rect_in,
+                               AcStrategyImage* acs) {
+
+  acs->FillDCT8(rect_in);
+
+  const size_t x0 = rect_in.x0();
+  const size_t y0 = rect_in.y0();
+  const size_t xsize = rect_in.xsize();
+  const size_t ysize = rect_in.ysize();
+
+  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
+    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
+      PartitionOne2(x0 + ix, y0 + iy, rect_in, config, acs);
+    }
+  }
+  return true;
+}
 // NOLINTNEXTLINE(google-readability-namespace-comments)
 }  // namespace HWY_NAMESPACE
 }  // namespace jxl
@@ -1595,35 +1953,75 @@ namespace jxl {
 
 //ALPCOM: DCT - KUANTALAMA CSV DEBUG
 std::ofstream dct_coeffs_file;
-std::ofstream quant_map_file;
 std::ofstream quantized_coeffs_file;
+std::ofstream quant_field_file;
+std::ofstream quant_matrices_file;
+std::ofstream pre_quant_coeffs_file;
+std::ofstream sparsity_cost_file;
+std::ofstream distortion_cost_file;
+std::ofstream masking_field_file;
+std::ofstream pixel_distortion_file;
 
 void OpenDebugDataFiles() {
   dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
-  quant_map_file.open("debug_quant_map.csv", std::ios::trunc);
+  sparsity_cost_file.open("debug_sparsity_cost.csv", std::ios::trunc);
   quantized_coeffs_file.open("debug_quantized_coeffs.csv", std::ios::trunc);
+  quant_field_file.open("debug_quant_field.csv", std::ios::trunc);
+  quant_matrices_file.open("debug_quant_matrices.csv", std::ios::trunc);
+  pre_quant_coeffs_file.open("debug_pre_quant_coeffs.csv", std::ios::trunc);
+  distortion_cost_file.open("debug_distortion_cost.csv", std::ios::trunc);
+  masking_field_file.open("debug_masking_field.csv", std::ios::trunc);
+  pixel_distortion_file.open("debug_pixel_distortion.csv", std::ios::trunc); // IDCT
 
-  if (dct_coeffs_file.is_open()) {
-    dct_coeffs_file << "BlockX,BlockY,Channel,Coeffs(64)\n";
+
+  if (pixel_distortion_file.is_open()) {
+    pixel_distortion_file << "BlockX,BlockY,Channel,TransformType,Coeffs(64)\n";
   }
-  if (quant_map_file.is_open()) {
-    quant_map_file << "BlockX,BlockY,QuantValue\n";
+
+  if (sparsity_cost_file.is_open()) {
+    sparsity_cost_file << "BlockX,BlockY,Channel,TransformType,NumNonZeros,NBits\n";
+  }
+  if (distortion_cost_file.is_open()) {
+    distortion_cost_file << "BlockX,BlockY,TransformType,"
+                         << "RawLoss_X,RawLoss_Y,RawLoss_B,"
+                         << "ChannelMul_X,ChannelMul_Y,ChannelMul_B,"
+                         << "TotalRawLoss,PixelCount,QuantField,"
+                         << "LossScalar,InfoLossMultiplier,FinalDistortionCost\n";
+  }
+  if (pre_quant_coeffs_file.is_open()) {
+    pre_quant_coeffs_file << "BlockX,BlockY,Channel,TransformType,PreQuantCoeffs(64)\n";
+  }
+  if (dct_coeffs_file.is_open()) {
+    dct_coeffs_file << "BlockX,BlockY,Channel,TransformType,Coeffs(64)\n";
   }
   if (quantized_coeffs_file.is_open()) {
-    quantized_coeffs_file << "BlockX,BlockY,Channel,QuantizedCoeffs(64)\n";
+    quantized_coeffs_file << "BlockX,BlockY,Channel,TransformType,QuantizedCoeffs(64)\n";
+  }
+  if (quant_field_file.is_open()) {
+    quant_field_file << "BlockX,BlockY,Channel,QuantField\n";
+  }
+  if (quant_matrices_file.is_open()) {
+    quant_matrices_file << "BlockX,BlockY,Channel,TransformType,MatrixType,Values(64)\n";
   }
 }
 
 void CloseDebugDataFiles() {
   if (dct_coeffs_file.is_open()) dct_coeffs_file.close();
-  if (quant_map_file.is_open()) quant_map_file.close();
   if (quantized_coeffs_file.is_open()) quantized_coeffs_file.close();
+  if (quant_field_file.is_open()) quant_field_file.close();
+  if (quant_matrices_file.is_open()) quant_matrices_file.close();
+  if (pre_quant_coeffs_file.is_open()) pre_quant_coeffs_file.close();
+  if (sparsity_cost_file.is_open()) sparsity_cost_file.close();
+  if (distortion_cost_file.is_open()) distortion_cost_file.close();
+  if (masking_field_file.is_open()) masking_field_file.close();
 }
 
 //ALPCOM: DEBUG END
 
 HWY_EXPORT(ProcessRectACS);
 HWY_EXPORT(ProposedProcessRectACS);
+HWY_EXPORT(ProposedProcessRectACS2);
+HWY_EXPORT(ProposedProcessRectACSBase);
 
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
@@ -1632,7 +2030,20 @@ Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
   //ALPCOM: DCT - KUANTALAMA CSV DEBUG
   OpenDebugDataFiles();
   //ALPCOM: DEBUG END
-
+  // ALPCOM: Masking field - CSV
+  static bool mask_saved = false;
+  if (masking_field_file.is_open() && !mask_saved && mask1x1.xsize() > 0) {
+    for (size_t y = 0; y < mask1x1.ysize(); ++y) {
+      const float* row = mask1x1.Row(y);
+      for (size_t x = 0; x < mask1x1.xsize(); ++x) {
+        masking_field_file << std::fixed << std::setprecision(8) << row[x]
+                           << (x == mask1x1.xsize() - 1 ? "" : ",");
+      }
+      masking_field_file << "\n";
+    }
+    mask_saved = true;
+  }
+  // ALPCOM
   config.dequant = matrices;
 
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
@@ -1665,7 +2076,8 @@ Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
   config.src_rows[1] = rect_in.ConstPlaneRow(src, 1, 0);
   config.src_rows[2] = rect_in.ConstPlaneRow(src, 2, 0);
   config.src_stride = src.PixelsPerRow();
-
+  config.xsize = src.xsize();
+  config.ysize = src.ysize();
   // Entropy estimate is composed of two factors:
   //  - estimate of the number of bits that will be used by the block
   //  - information loss due to quantization
@@ -1702,6 +2114,15 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
                                          const ColorCorrelationMap& cmap,
                                          AcStrategyImage* ac_strategy,
                                          size_t thread) {
+
+  const size_t x0 = rect.x0();
+  const size_t y0 = rect.y0();
+  const size_t xsize = rect.xsize();
+  const size_t ysize = rect.ysize();
+  std::cout << "İlk aşama " << "x: " << x0 <<" y: "<<y0 <<std::endl;
+  std::cout << "İlk aşama " << "yatay blok sayısı: " <<xsize <<" dikey blok sayısı: "<<ysize <<std::endl;
+
+
   //ALPCOM: Debug
   static bool xyb_data_saved = false;
   if (!xyb_data_saved) {
@@ -1718,11 +2139,10 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
     xyb_data_saved = true;
   }
   //ALPCOM: Debug end
-  auto deneme = cparams.speed_tier;
-  if (cparams.speed_tier == SpeedTier::kKitten) {
-    printf("Önerilen yöntem uygulanıyor");
+  if (cparams.speed_tier == SpeedTier::kGlacier) {
+
     return HWY_DYNAMIC_DISPATCH(ProposedProcessRectACS)(cparams, config, rect,
-                                                        ac_strategy);
+                                                         ac_strategy);
   }
   // In Cheetah mode, use DCT8 everywhere and uniform quantization.
   if (cparams.speed_tier >= SpeedTier::kCheetah) {

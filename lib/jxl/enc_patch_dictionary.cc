@@ -118,7 +118,7 @@ Status SavePatchLocationsVisualisation(
     file.write(reinterpret_cast<const char*>(row_buffer.data()),
                row_buffer.size());
   }
-  fprintf(stderr, ">>> Yama Konum Haritası Kaydedildi: patches_locations.ppm\n");
+  //fprintf(stderr, ">>> Yama Konum Haritası Kaydedildi: patches_locations.ppm\n");
 
   return true;
 }
@@ -845,7 +845,7 @@ Status FindBestPatchDictionary(const Image3F& opsin,
   }
   //------------BEGIN - DEBUG SPLINES VISU-----------------------------
 
-  PrintPatchStats(info);
+  //PrintPatchStats(info);
   JXL_RETURN_IF_ERROR(
       SavePatchLocationsVisualisation(info, state, memory_manager));
 

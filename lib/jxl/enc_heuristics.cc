@@ -62,6 +62,7 @@
 #include "lib/jxl/quant_weights.h"
 #include "lib/jxl/render_pipeline/render_pipeline.h"
 
+#include <iostream>
 
 //debug
 #include <fstream>
@@ -1205,8 +1206,11 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
                                           initial_quant_masking,
                                           initial_quant_masking1x1, &matrices));
 
+  //process_tile -> thread havuzuna verilecek iş birimi
+  //tid -> işlenecek karonun kimliği
+
   auto process_tile = [&](const uint32_t tid, const size_t thread) -> Status {
-    size_t n_enc_tiles = DivCeil(frame_dim.xsize_blocks, kEncTileDimInBlocks);
+    size_t n_enc_tiles = DivCeil(frame_dim.xsize_blocks, kEncTileDimInBlocks); //Yatayda karo sayısı
     size_t tx = tid % n_enc_tiles;
     size_t ty = tid / n_enc_tiles;
     size_t by0 = ty * kEncTileDimInBlocks;
@@ -1216,7 +1220,11 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
     size_t bx1 =
         std::min((tx + 1) * kEncTileDimInBlocks, frame_dim.xsize_blocks);
     Rect r(bx0, by0, bx1 - bx0, by1 - by0);
-
+    std::cout << "Rect: ("
+              << bx0 << ", "
+              << by0 << ", "
+              << (bx1 - bx0) << ", "
+              << (by1 - by0) << ")\n";
     // For speeds up to Wombat, we only compute the color correlation map
     // once we know the transform type and the quantization map.
     if (cparams.speed_tier <= SpeedTier::kSquirrel) {
@@ -1228,7 +1236,7 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
     }
 
     // Choose block sizes.
-    JXL_RETURN_IF_ERROR(
+    JXL_RETURN_IF_ERROR(//GLOBAL KONUMLARINA BAKMAK LAZIM
         acs_heuristics.ProcessRect(r, cmap, &ac_strategy, thread));
 
     // Always set the initial quant field, so we can compute the CfL map with
