@@ -1747,223 +1747,6 @@ Status PartitionOne(size_t bx, size_t by, float r, const ACSConfig& cfg,
   return true;
 }
 
-Status ProposedProcessRectACS(const CompressParams& cparams,
-                              const ACSConfig& config, const Rect& rect_in,
-                              AcStrategyImage* acs) {
-  const float ba = cparams.butteraugli_distance;
-  float r = 1.35f;
-  if (ba > 8.0f)
-    r = 1.50f;
-  else if (ba < 2.0f)
-    r = 1.20f;
-
-  acs->FillDCT8(rect_in);
-
-  const size_t x0 = rect_in.x0();
-  const size_t y0 = rect_in.y0();
-  const size_t xsize = rect_in.xsize();
-  const size_t ysize = rect_in.ysize();
-
-  std::cout << "rect " << "x: " <<x0 <<" y: "<<y0 <<std::endl;
-  std::cout << "rect " << "yatay blok sayısı: " <<xsize <<" dikey blok sayısı: "<<ysize <<std::endl;
-
-
-  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
-    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
-      PartitionOne(x0 + ix, y0 + iy, r, config, acs);
-    }
-  }
-  return true;
-}
-
-
-
-
-Status PartitionOneBase(size_t bx, size_t by, float r, const ACSConfig& cfg,
-                    AcStrategyImage* acs) {
-  std::cout << "alt rect " << "x: " <<bx <<" y: "<<by <<std::endl;
-
-  constexpr size_t k = kBlockDim;
-  const size_t px = bx * k, py = by * k;
-  constexpr size_t side = 32, half = 16;
-  const Rect top(px, py, side, half), bot(px, py + half, side, half);
-  const Rect lef(px, py, half, side), rig(px + half, py, half, side);
-  const Rect tl(px, py, half, half), tr(px + half, py, half, half);
-  const Rect bl(px, py + half, half, half), br(px + half, py + half, half, half);
-
-  const float h1 = CalculateSML(top, cfg);
-  const float h2 = CalculateSML(bot, cfg);
-  const float v1 = CalculateSML(lef, cfg);
-  const float v2 = CalculateSML(rig, cfg);
-  const float d1 = CalculateSML(tl, cfg) + CalculateSML(br, cfg);
-  const float d2 = CalculateSML(tr, cfg) + CalculateSML(bl, cfg);
-
-  auto ratio = [](float a, float b) {
-    const float mn = std::min(a, b), mx = std::max(a, b);
-    return (mn > 1e-6f) ? (mx / mn) : 1.0f;
-  };
-
-  // const float Rh = ratio(h1, h2);
-  // const float Rv = ratio(v1, v2);
-  // const float Rd = ratio(d1, d2);
-
-
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  static std::uniform_real_distribution<float> distrib(1.0f, 2.0f);
-  const float Rd = distrib(gen);
-  const float Rh = distrib(gen);
-  const float Rv = distrib(gen);
-
-
-  if (Rd > r) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by + 2, AcStrategyType::DCT16X16);
-  } else if (Rh > Rv) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT32X16);
-  } else if (Rv > Rh) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X32);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X32);
-  } else {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X32);
-  }
-
-  return true;
-}
-
-Status ProposedProcessRectACSBase(const CompressParams& cparams,
-                              const ACSConfig& config, const Rect& rect_in,
-                              AcStrategyImage* acs) {
-  const float ba = cparams.butteraugli_distance;
-  float r = 1.35f;
-  if (ba > 8.0f)
-    r = 1.50f;
-  else if (ba < 2.0f)
-    r = 1.20f;
-
-  acs->FillDCT8(rect_in);
-
-  const size_t x0 = rect_in.x0();
-  const size_t y0 = rect_in.y0();
-  const size_t xsize = rect_in.xsize();
-  const size_t ysize = rect_in.ysize();
-
-  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
-    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
-      PartitionOneBase(x0 + ix, y0 + iy, r, config, acs);
-    }
-  }
-  return true;
-}
-
-
-static inline Status TrySetAcsSafe2(AcStrategyImage* acs,
-                                   const Rect& rect_in,
-                                   size_t bx, size_t by,
-                                   AcStrategyType t) {
-  const AcStrategy s = AcStrategy::FromRawStrategy(t);
-
-  // 1) Tüm resim sınırı (8x8 blok gridi) kontrolü
-  if (bx + s.covered_blocks_x() > acs->xsize()) return false;
-  if (by + s.covered_blocks_y() > acs->ysize()) return false;
-
-  // 2) Mevcut 64x64'lük rect_in'in sınırları kontrolü
-  const size_t rx0 = rect_in.x0(), ry0 = rect_in.y0();
-  const size_t rx1 = rx0 + rect_in.xsize();
-  const size_t ry1 = ry0 + rect_in.ysize();
-  if (bx < rx0 || by < ry0) return false;
-  if (bx + s.covered_blocks_x() > rx1) return false;
-  if (by + s.covered_blocks_y() > ry1) return false;
-
-  // Sınırlar uygunsa stratejiyi ayarla.
-  return acs->Set(bx, by, t);
-}
-
-
-Status PartitionOne2(size_t bx, size_t by, const Rect& rect_in,
-                     const ACSConfig& cfg, AcStrategyImage* acs) {
-  constexpr size_t k = kBlockDim;
-  const size_t px = bx * k, py = by * k;
-
-
-  const Rect full(px, py, 32, 32);
-  const Rect top(px, py, 32, 16), bot(px, py + 16, 32, 16);
-  const Rect lef(px, py, 16, 32), rig(px + 16, py, 16, 32);
-  const Rect tl(px, py, 16, 16), tr(px + 16, py, 16, 16);
-  const Rect bl(px, py + 16, 16, 16), br(px + 16, py + 16, 16, 16);
-
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  static std::uniform_real_distribution<float> distrib(0.0f, 100.0f);
-
-
-  const float cost_32x32 = distrib(gen);
-  const float cost_h     = distrib(gen); // Yatay bölme
-  const float cost_v     = distrib(gen); // Dikey bölme
-  const float cost_q     = distrib(gen); // Çeyrek bölme
-  float min_cost = cost_32x32;
-  AcStrategyType best_strategy = AcStrategyType::DCT32X32;
-
-  if (cost_h < min_cost) {
-    min_cost = cost_h;
-    best_strategy = AcStrategyType::DCT32X16;
-  }
-  if (cost_v < min_cost) {
-    min_cost = cost_v;
-    best_strategy = AcStrategyType::DCT16X32;
-  }
-  if (cost_q < min_cost) {
-    min_cost = cost_q;
-    best_strategy = AcStrategyType::DCT16X16;
-  }
-
-  switch (best_strategy) {
-    case AcStrategyType::DCT32X32:
-      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT32X32);
-      break;
-    case AcStrategyType::DCT32X16:
-      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT32X16);
-      TrySetAcsSafe2(acs, rect_in, bx, by + 2, AcStrategyType::DCT32X16);
-      break;
-    case AcStrategyType::DCT16X32:
-      TrySetAcsSafe2(acs, rect_in, bx, by, AcStrategyType::DCT16X32);
-      TrySetAcsSafe2(acs, rect_in, bx + 2, by, AcStrategyType::DCT16X32);
-      break;
-    case AcStrategyType::DCT16X16:
-      TrySetAcsSafe2(acs, rect_in, bx,     by,     AcStrategyType::DCT16X16);
-      TrySetAcsSafe2(acs, rect_in, bx + 2, by,     AcStrategyType::DCT16X16);
-      TrySetAcsSafe2(acs, rect_in, bx,     by + 2, AcStrategyType::DCT16X16);
-      TrySetAcsSafe2(acs, rect_in, bx + 2, by + 2, AcStrategyType::DCT16X16);
-      break;
-    default:
-      break;
-  }
-
-  return true;
-}
-
-
-Status ProposedProcessRectACS2(const CompressParams& cparams,
-                               const ACSConfig& config, const Rect& rect_in,
-                               AcStrategyImage* acs) {
-
-  acs->FillDCT8(rect_in);
-
-  const size_t x0 = rect_in.x0();
-  const size_t y0 = rect_in.y0();
-  const size_t xsize = rect_in.xsize();
-  const size_t ysize = rect_in.ysize();
-
-  for (size_t iy = 0; iy + 4 <= ysize; iy += 4) {
-    for (size_t ix = 0; ix + 4 <= xsize; ix += 4) {
-      PartitionOne2(x0 + ix, y0 + iy, rect_in, config, acs);
-    }
-  }
-  return true;
-}
 // NOLINTNEXTLINE(google-readability-namespace-comments)
 }  // namespace HWY_NAMESPACE
 }  // namespace jxl
@@ -2045,9 +1828,6 @@ void CloseDebugDataFiles() {
 //ALPCOM: DEBUG END
 
 HWY_EXPORT(ProcessRectACS);
-HWY_EXPORT(ProposedProcessRectACS);
-HWY_EXPORT(ProposedProcessRectACS2);
-HWY_EXPORT(ProposedProcessRectACSBase);
 
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
@@ -2160,9 +1940,6 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
   const size_t y0 = rect.y0();
   const size_t xsize = rect.xsize();
   const size_t ysize = rect.ysize();
-  std::cout << "İlk aşama " << "x: " << x0 <<" y: "<<y0 <<std::endl;
-  std::cout << "İlk aşama " << "yatay blok sayısı: " <<xsize <<" dikey blok sayısı: "<<ysize <<std::endl;
-
 
   //ALPCOM: Debug
   static bool xyb_data_saved = false;
@@ -2180,11 +1957,7 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
     xyb_data_saved = true;
   }
   //ALPCOM: Debug end
-  if (cparams.speed_tier == SpeedTier::kGlacier) {
 
-    return HWY_DYNAMIC_DISPATCH(ProposedProcessRectACS)(cparams, config, rect,
-                                                         ac_strategy);
-  }
   // In Cheetah mode, use DCT8 everywhere and uniform quantization.
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
     ac_strategy->FillDCT8(rect);

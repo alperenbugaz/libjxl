@@ -1220,11 +1220,7 @@ Status LossyFrameHeuristics(const FrameHeader& frame_header,
     size_t bx1 =
         std::min((tx + 1) * kEncTileDimInBlocks, frame_dim.xsize_blocks);
     Rect r(bx0, by0, bx1 - bx0, by1 - by0);
-    std::cout << "Rect: ("
-              << bx0 << ", "
-              << by0 << ", "
-              << (bx1 - bx0) << ", "
-              << (by1 - by0) << ")\n";
+
     // For speeds up to Wombat, we only compute the color correlation map
     // once we know the transform type and the quantization map.
     if (cparams.speed_tier <= SpeedTier::kSquirrel) {
