@@ -505,12 +505,12 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
                                       (iy * kBlockDim + dy) *
                                           (acs.covered_blocks_x() * kBlockDim) +
                                       ix * kBlockDim + dx);
-              if (x + ix * 8 + dx + Lanes(df8) <= config.mask1x1_xsize) {
+              if (x + ix * 8 + dx + Lanes(df8) <= config.mask1x1_xsize) { //mask 1x1'i al
                 auto masku =
                     Add(Load(df8, config.MaskingPtr1x1(x + ix * 8 + dx,
                                                        y + iy * 8 + dy)),
                         masku_off);
-                in = Mul(masku, in);
+                in = Mul(masku, in); //hata x maske
                 in = Mul(in, in); //karesi
                 in = Mul(in, in); //4.kuvveti
                 in = Mul(in, in); //8.kuvveti
@@ -579,7 +579,6 @@ std::string AcStrategyTypeToString(AcStrategyType type) {
 }
 
 
-// ALPCOM: Fonksiyon imzasına 3 yeni output parametresi eklendi.
 Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
                        size_t y, const ACSConfig& config,
                        const float* JXL_RESTRICT cmap_factors, float* block,
@@ -844,6 +843,7 @@ Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
   entropy = (bit_cost * entropy_mul) + (config.info_loss_multiplier * loss_scalar);
   return true;
 }
+
 Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
                             float butteraugli_target, const ACSConfig& config,
                             const float* JXL_RESTRICT cmap_factors,
@@ -979,116 +979,6 @@ AcStrategyType AcsHorizontalSplit(size_t blocks) {
     return AcStrategyType::DCT32X64;
   }
 }
-
-
-/**
- * @brief Sum-Modified Laplacian (SML) metriğini hesaplar.
- * Bu metrik, piksellerin komşularıyla olan farklarının toplamını alarak
- * bir bölgedeki kenar ve doku yoğunluğunu ölçer.
- * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
- * @param config Görüntü verilerine erişim sağlayan yapı.
- * @return Bölgenin SML skorunu döndürür. Yüksek skor, yüksek doku yoğunluğuna işaret eder.
- */
-
-
-float CalculateSML(const Rect& rect, const ACSConfig& config) {
-  float sum = 0.0f;
-  const float* y_plane = config.src_rows[1];
-  const size_t stride = config.src_stride;
-  if (rect.x0() + rect.xsize() > config.xsize ||
-      rect.y0() + rect.ysize() > config.ysize || rect.xsize() < 2 ||
-      rect.ysize() < 2) {
-    return 0.0f;
-      }
-  for (size_t y = 1; y < rect.ysize(); ++y) {
-    const float* JXL_RESTRICT c_row =
-        y_plane + (rect.y0() + y) * stride + rect.x0();
-    for (size_t x = 1; x < rect.xsize(); ++x) {
-      const float laplacian =
-          std::abs(2 * c_row[x] - c_row[x - 1] - c_row[x - stride]);
-      sum += laplacian;
-    }
-  }
-  const size_t num_pixels = rect.xsize() * rect.ysize();
-  return (num_pixels == 0) ? 0.0f : sum / num_pixels;
-}
-/**
- * @brief Zero-Crossing (ZC) metriğini hesaplar.
- * Piksel değerlerinin sıfır (veya bir eşik) etrafında ne sıklıkla işaret
- * değiştirdiğini sayarak doku frekansını ölçer.
- * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
- * @param config Görüntü verilerine erişim sağlayan yapı.
- * @return Bölgenin ZC skorunu döndürür.
- */
-float CalculateZC(const Rect& rect, const ACSConfig& config) {
-  float crossings = 0.0f;
-  const float* y_plane = config.src_rows[1];
-  const size_t stride = config.src_stride;
-  if (rect.x0() + rect.xsize() >= config.xsize ||
-      rect.y0() + rect.ysize() >= config.ysize) {
-    return 0.0f;
-      }
-  for (size_t y = 0; y < rect.ysize() - 1; ++y) {
-    const float* JXL_RESTRICT c_row =
-        y_plane + (rect.y0() + y) * stride + rect.x0();
-    for (size_t x = 0; x < rect.xsize() - 1; ++x) {
-      if ((c_row[x] > 0 && c_row[x + 1] < 0) ||
-          (c_row[x] < 0 && c_row[x + 1] > 0)) {
-        crossings++;
-          }
-      if ((c_row[x] > 0 && c_row[x + stride] < 0) ||
-          (c_row[x] < 0 && c_row[x + stride] > 0)) {
-        crossings++;
-          }
-    }
-  }
-  const size_t num_pixels = rect.xsize() * rect.ysize();
-  return (num_pixels == 0) ? 0.0f : crossings / num_pixels;
-}
-
-/**
- * @brief Colorfulness (Renklilik) metriğini hesaplar.
- * Bir bölgedeki renklerin ne kadar canlı ve doygun olduğunu ölçer. XYB renk
- * uzayında, X (kırmızı-yeşil) ve B (sarı-mavi) kanallarının ortalaması ve
- * standart sapması kullanılarak hesaplanır.
- * @param rect Hesaplama yapılacak bölge (piksel cinsinden).
- * @param config Görüntü verilerine erişim sağlayan yapı.
- * @return Bölgenin renklilik skorunu döndürür.
- */
-float CalculateColorfulness(const Rect& rect, const ACSConfig& config) {
-  float sum_x = 0, sum_b = 0;
-  float sum_sq_x = 0, sum_sq_b = 0;
-  const float* x_plane = config.src_rows[0];
-  const float* b_plane = config.src_rows[2];
-  const size_t stride = config.src_stride;
-  const size_t num_pixels = rect.xsize() * rect.ysize();
-  if (num_pixels == 0) return 0.0f;
-  if (rect.x0() + rect.xsize() > config.xsize ||
-      rect.y0() + rect.ysize() > config.ysize) {
-    return 0.0f;
-      }
-  for (size_t y = 0; y < rect.ysize(); ++y) {
-    const float* JXL_RESTRICT row_x =
-        x_plane + (rect.y0() + y) * stride + rect.x0();
-    const float* JXL_RESTRICT row_b =
-        b_plane + (rect.y0() + y) * stride + rect.x0();
-    for (size_t x = 0; x < rect.xsize(); ++x) {
-      sum_x += row_x[x];
-      sum_b += row_b[x];
-      sum_sq_x += row_x[x] * row_x[x];
-      sum_sq_b += row_b[x] * row_b[x];
-    }
-  }
-  float mean_x = sum_x / num_pixels;
-  float mean_b = sum_b / num_pixels;
-  float std_x = std::sqrt(sum_sq_x / num_pixels - mean_x * mean_x);
-  float std_b = std::sqrt(sum_sq_b / num_pixels - mean_b * mean_b);
-  return std::sqrt(std_x * std_x + std_b * std_b) +
-         0.3f * std::sqrt(mean_x * mean_x + mean_b * mean_b);
-}
-
-
-
 
 
 
@@ -1666,86 +1556,6 @@ static inline Status TrySetAcsSafe(AcStrategyImage* acs,
 }
 
 
-Status PartitionOne(size_t bx, size_t by, float r, const ACSConfig& cfg,
-                    AcStrategyImage* acs) {
-  std::cout << "alt rect " << "x: " <<bx <<" y: "<<by <<std::endl;
-
-  constexpr size_t k = kBlockDim;
-  const size_t px = bx * k, py = by * k;
-  constexpr size_t side = 32, half = 16;
-  const Rect top(px, py, side, half), bot(px, py + half, side, half);
-  const Rect lef(px, py, half, side), rig(px + half, py, half, side);
-  const Rect tl(px, py, half, half), tr(px + half, py, half, half);
-  const Rect bl(px, py + half, half, half), br(px + half, py + half, half, half);
-
-  const float h1 = CalculateSML(top, cfg);
-  const float h2 = CalculateSML(bot, cfg);
-  const float v1 = CalculateSML(lef, cfg);
-  const float v2 = CalculateSML(rig, cfg);
-  const float d1 = CalculateSML(tl, cfg) + CalculateSML(br, cfg);
-  const float d2 = CalculateSML(tr, cfg) + CalculateSML(bl, cfg);
-
-  auto ratio = [](float a, float b) {
-    const float mn = std::min(a, b), mx = std::max(a, b);
-    return (mn > 1e-6f) ? (mx / mn) : 1.0f;
-  };
-
-  // const float Rh = ratio(h1, h2);
-  // const float Rv = ratio(v1, v2);
-  // const float Rd = ratio(d1, d2);
-
-
-  // static std::random_device rd;
-  // static std::mt19937 gen(rd());
-  // static std::uniform_real_distribution<float> distrib(0.1f, 2.0f);
-  // const float Rd = distrib(gen);
-  // const float Rh = distrib(gen);
-  // const float Rv = distrib(gen);
-
-
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
-  static std::uniform_real_distribution<float> U01(0.0f, 1.0f);
-  static std::uniform_real_distribution<float> U_0p1_2p0(0.1f, 2.0f);
-
-  // Rd'yi düşük değerlere biasla (çoğu kez r'nin altında olur)
-  const float Rd = 0.1f + std::pow(U01(gen), 3.0f) * (2.0f - 0.1f);
-
-  // Rh ve Rv'yi aynı kovaya kuantize ederek eşitlik ihtimalini çok yükselt
-  auto quantize = [](float x, float step) {
-    return std::round(x / step) * step;
-  };
-  const float step = 0.05f;                 // daha büyük step = daha sık eşitlik
-  const float base = U_0p1_2p0(gen);
-  const float Rh   = quantize(base, step);
-  const float Rv   = quantize(U_0p1_2p0(gen), step); // çoğu zaman Rh == Rv olur
-
-  if (Rd > r) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT16X16);
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by + 2, AcStrategyType::DCT16X16);
-  } else if (Rh > Rv) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by + 2, AcStrategyType::DCT32X16);
-
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X16);
-
-    if (!TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx, by, AcStrategyType::DCT32X16)) {
-      std::cerr << "Failed to set TOP half at (" << bx << "," << by << ")\n";
-    }
-    if (!TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx, by + 2, AcStrategyType::DCT32X16)) {
-      std::cerr << "Failed to set BOTTOM half at (" << bx << "," << by + 2 << ")\n";
-    }
-  } else if (Rv > Rh) {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx + 2, by,     AcStrategyType::DCT16X32);
-
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT16X32);
-  } else {
-    TrySetAcsSafe(acs, Rect(bx, by, 4, 4), bx,     by,     AcStrategyType::DCT32X32);
-  }
-
-  return true;
-}
 
 // NOLINTNEXTLINE(google-readability-namespace-comments)
 }  // namespace HWY_NAMESPACE
@@ -1903,19 +1713,19 @@ Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
   //  - estimate of the number of bits that will be used by the block
   //  - information loss due to quantization
   // The following constant controls the relative weights of these components.
-  config.info_loss_multiplier = 1.2; // Formül (22)
-  config.zeros_mul = 9.3089059022677905; // Formül (23)
-  config.cost_delta = 10.833273317067883; // Formül (24)
+  config.info_loss_multiplier = 1.2; // Formül (28)
+  config.zeros_mul = 9.3089059022677905; // Formül (29)
+  config.cost_delta = 10.833273317067883; // Formül (30)
 
-  static const float kBias = 0.13731742964354549; //Formül (18)
-  const float ratio = (cparams.butteraugli_distance + kBias) / (1.0f + kBias); //Formül (17)
+  static const float kBias = 0.13731742964354549; //Formül (24)
+  const float ratio = (cparams.butteraugli_distance + kBias) / (1.0f + kBias); //Formül (23)
 
-  static const float kPow1 = 0.33677806662454718; // Formül (19)
-  static const float kPow2 = 0.50990926717963703; //Formül (20)
-  static const float kPow3 = 0.36702940662370243; //Formül (21)
-  config.info_loss_multiplier *= std::pow(ratio, kPow1); //Formül (14)
-  config.zeros_mul *= std::pow(ratio, kPow2); //Formül (15)
-  config.cost_delta *= std::pow(ratio, kPow3); //Formül (16)
+  static const float kPow1 = 0.33677806662454718; // Formül (25)
+  static const float kPow2 = 0.50990926717963703; //Formül (26)
+  static const float kPow3 = 0.36702940662370243; //Formül (27)
+  config.info_loss_multiplier *= std::pow(ratio, kPow1); //Formül (20)
+  config.zeros_mul *= std::pow(ratio, kPow2); //Formül (21)
+  config.cost_delta *= std::pow(ratio, kPow3); //Formül (22)
   return true;
 }
 
@@ -1935,11 +1745,6 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
                                          const ColorCorrelationMap& cmap,
                                          AcStrategyImage* ac_strategy,
                                          size_t thread) {
-
-  const size_t x0 = rect.x0();
-  const size_t y0 = rect.y0();
-  const size_t xsize = rect.xsize();
-  const size_t ysize = rect.ysize();
 
   //ALPCOM: Debug
   static bool xyb_data_saved = false;

@@ -514,22 +514,23 @@ struct AdaptiveQuantizationImpl {
         const size_t x2 = x + 1 < xsize ? x + 1 : x;
         const size_t x1 = x > 0 ? x - 1 : x;
         const float base =
-            0.25f * (row_in2[x] + row_in1[x] + row_in[x1] + row_in[x2]);
-        const float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma(
+            0.25f * (row_in2[x] + row_in1[x] + row_in[x1] + row_in[x2]); //Formül (17)
+        const float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma( //Formül (18)
             row_in[x] + match_gamma_offset);
-        float diff = std::abs(gammac * (row_in[x] - base));
+        float diff = std::abs(gammac * (row_in[x] - base)); //Formül (16)
         static const double kScaler = 1.0;
         diff *= kScaler;
-        diff = std::log1p(diff);
+        diff = std::log1p(diff); //Formül (15)
         static const float kMul = 1.0;
         static const float kOffset = 0.01;
-        mask1x1_out[x] = kMul / (diff + kOffset);
+        mask1x1_out[x] = kMul / (diff + kOffset); //Formül (14)
       };
       for (size_t x = x_start_1x1; x < x_end_1x1; ++x) {
         scalar_pixel1x1(x);
       }
     }
 
+    //Harita için rect sınır aşımı
     size_t y_start = rect_in.y0() + rect_out.y0() * 8;
     size_t y_end = y_start + rect_out.ysize() * 8;
 
