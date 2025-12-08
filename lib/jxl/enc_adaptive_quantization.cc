@@ -524,6 +524,8 @@ struct AdaptiveQuantizationImpl {
         static const float kMul = 1.0;
         static const float kOffset = 0.01;
         mask1x1_out[x] = kMul / (diff + kOffset); //Formül (14)
+        //mask1x1_out[x] = diff + 0.01f; //Formül (14)
+
       };
       for (size_t x = x_start_1x1; x < x_end_1x1; ++x) {
         scalar_pixel1x1(x);

@@ -558,23 +558,34 @@ std::string AcStrategyTypeToString(AcStrategyType type) {
   switch (type) {
     case AcStrategyType::DCT: return "DCT";
     case AcStrategyType::IDENTITY: return "IDENTITY";
-    case AcStrategyType::DCT4X4: return "DCT4X4";
-    case AcStrategyType::DCT4X8: return "DCT4X8";
-    case AcStrategyType::DCT8X4: return "DCT8X4";
     case AcStrategyType::DCT2X2: return "DCT2X2";
+    case AcStrategyType::DCT4X4: return "DCT4X4";
     case AcStrategyType::DCT16X16: return "DCT16X16";
+    case AcStrategyType::DCT32X32: return "DCT32X32";
     case AcStrategyType::DCT16X8: return "DCT16X8";
     case AcStrategyType::DCT8X16: return "DCT8X16";
-    case AcStrategyType::DCT32X32: return "DCT32X32";
-    case AcStrategyType::DCT32X16: return "DCT32X16";
-    case AcStrategyType::DCT16X32: return "DCT16X32";
     case AcStrategyType::DCT32X8: return "DCT32X8";
     case AcStrategyType::DCT8X32: return "DCT8X32";
+    case AcStrategyType::DCT32X16: return "DCT32X16";
+    case AcStrategyType::DCT16X32: return "DCT16X32";
+    case AcStrategyType::DCT4X8: return "DCT4X8";
+    case AcStrategyType::DCT8X4: return "DCT8X4";
     case AcStrategyType::AFV0: return "AFV0";
     case AcStrategyType::AFV1: return "AFV1";
     case AcStrategyType::AFV2: return "AFV2";
     case AcStrategyType::AFV3: return "AFV3";
-    default: return "UNKNOWN";
+    case AcStrategyType::DCT64X64: return "DCT64X64";
+    case AcStrategyType::DCT64X32: return "DCT64X32";
+    case AcStrategyType::DCT32X64: return "DCT32X64";
+    case AcStrategyType::DCT128X128: return "DCT128X128";
+    case AcStrategyType::DCT128X64: return "DCT128X64";
+    case AcStrategyType::DCT64X128: return "DCT64X128";
+    case AcStrategyType::DCT256X256: return "DCT256X256";
+    case AcStrategyType::DCT256X128: return "DCT256X128";
+    case AcStrategyType::DCT128X256: return "DCT128X256";
+
+    default:
+      return "UNKNOWN";
   }
 }
 
@@ -1086,6 +1097,80 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
 // bx, by addresses the 64x64 block at 8x8 subresolution
 // cx, cy addresses the left, upper 8x8 block position of the candidate
 // transform.
+
+Status TryMergeAcsDebug(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
+                   size_t cy, const ACSConfig& config,
+                   const float* JXL_RESTRICT cmap_factors,
+                   AcStrategyImage* JXL_RESTRICT ac_strategy,
+                   const float entropy_mul, const uint8_t candidate_priority,
+                   uint8_t* priority, float* JXL_RESTRICT entropy_estimate,
+                   float* block, float* scratch_space, uint32_t* quantized,
+                   float butteraugli_target,
+                   int encoding_speed_tier) {
+  AcStrategy acs = AcStrategy::FromRawStrategy(acs_raw);
+  float entropy_current = 0;
+  for (size_t iy = 0; iy < acs.covered_blocks_y(); ++iy) {
+    for (size_t ix = 0; ix < acs.covered_blocks_x(); ++ix) {
+      if (priority[(cy + iy) * 8 + (cx + ix)] >= candidate_priority) {
+        return true;
+      }
+      entropy_current += entropy_estimate[(cy + iy) * 8 + (cx + ix)];
+    }
+  }
+
+  float entropy_candidate;
+  float bit_cost, quant_field, loss_scalar;
+
+  JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      acs, entropy_mul, (bx + cx) * 8, (by + cy) * 8, config, cmap_factors,
+      block, scratch_space, quantized, entropy_candidate,
+      bit_cost, quant_field, loss_scalar));
+
+  {
+      static const float k8x8mul1 = -0.4;
+      static const float k8x8mul2 = 1.0;
+      static const float k8x8base = 1.4;
+      const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+      const float entropy_estimate_val = entropy_candidate * mul8x8;
+
+      std::ofstream log_file("entropy_log.csv", std::ios::app);
+      if (log_file.is_open()) {
+        log_file << (bx + cx) * 8 << ","
+                 << (by + cy) * 8 << ","
+                 << AcStrategyTypeToString(acs.Strategy()) << ","
+                 << std::fixed << std::setprecision(6) << butteraugli_target << ","
+                 << encoding_speed_tier << ","
+                 << 1.0 << "," // BaseEntropyMul (Merge için tam bilinmiyor, 1.0 placeholder)
+                 << entropy_mul << ","
+                 << cmap_factors[0] << ","
+                 << cmap_factors[2] << ","
+                 << config.info_loss_multiplier << ","
+                 << config.zeros_mul << ","
+                 << config.cost_delta << ","
+                 << bit_cost << ","
+                 << quant_field << ","
+                 << loss_scalar << ","
+                 << entropy_candidate << ","
+                 << mul8x8 << ","
+                 << entropy_estimate_val << "\n";
+      }
+  }
+
+  if (entropy_candidate >= entropy_current) return true;
+
+  // Accept the candidate.
+  for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
+    for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
+      entropy_estimate[(cy + iy) * 8 + cx + ix] = 0;
+      priority[(cy + iy) * 8 + cx + ix] = candidate_priority;
+    }
+  }
+  JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_raw));
+  entropy_estimate[cy * 8 + cx] = entropy_candidate;
+  return true;
+}
+
+
 Status TryMergeAcs(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
                    size_t cy, const ACSConfig& config,
                    const float* JXL_RESTRICT cmap_factors,
@@ -1143,6 +1228,168 @@ static void SetEntropyForTransform(size_t cx, size_t cy,
 //
 // This is now generalized to concern about squares
 // of blocks X blocks size, where a block is 8x8 pixels.
+Status FindBestFirstLevelDivisionForSquareDebug(
+    size_t blocks,
+    bool allow_square_transform,
+    size_t bx, size_t by,
+    size_t cx, size_t cy,
+    const ACSConfig& config,
+    const float* JXL_RESTRICT cmap_factors,
+    AcStrategyImage* JXL_RESTRICT ac_strategy,
+    const float entropy_mul_JXK,
+    const float entropy_mul_JXJ,
+    float* JXL_RESTRICT entropy_estimate,
+    float* block,
+    float* scratch_space,
+    uint32_t* quantized,
+    float butteraugli_target,
+    int encoding_speed_tier
+    ) {
+
+  const size_t blocks_half = blocks / 2;
+  const AcStrategyType acs_rawJXK = AcsVerticalSplit(blocks);
+  const AcStrategyType acs_rawKXJ = AcsHorizontalSplit(blocks);
+  const AcStrategyType acs_rawJXJ = AcsSquare(blocks);
+
+  const AcStrategy acsJXK = AcStrategy::FromRawStrategy(acs_rawJXK);
+  const AcStrategy acsKXJ = AcStrategy::FromRawStrategy(acs_rawKXJ);
+  const AcStrategy acsJXJ = AcStrategy::FromRawStrategy(acs_rawJXJ);
+
+  AcStrategyRow row0 = ac_strategy->ConstRow(by + cy + 0);
+  AcStrategyRow row1 = ac_strategy->ConstRow(by + cy + blocks_half);
+
+  if (MultiBlockTransformCrossesHorizontalBoundary(*ac_strategy, bx + cx,
+                                                   by + cy, bx + cx + blocks) ||
+      MultiBlockTransformCrossesHorizontalBoundary(
+          *ac_strategy, bx + cx, by + cy + blocks, bx + cx + blocks) ||
+      MultiBlockTransformCrossesVerticalBoundary(*ac_strategy, bx + cx, by + cy,
+                                                 by + cy + blocks) ||
+      MultiBlockTransformCrossesVerticalBoundary(*ac_strategy, bx + cx + blocks,
+                                                 by + cy, by + cy + blocks)) {
+    return true;
+  }
+
+  const bool allow_JXK = !MultiBlockTransformCrossesVerticalBoundary(
+      *ac_strategy, bx + cx + blocks_half, by + cy, by + cy + blocks);
+  const bool allow_KXJ = !MultiBlockTransformCrossesHorizontalBoundary(
+      *ac_strategy, bx + cx, by + cy + blocks_half, bx + cx + blocks);
+
+  float entropy[2][2] = {};
+  for (size_t dy = 0; dy < blocks; ++dy) {
+    for (size_t dx = 0; dx < blocks; ++dx) {
+      entropy[dy / blocks_half][dx / blocks_half] +=
+          entropy_estimate[(cy + dy) * 8 + (cx + dx)];
+    }
+  }
+
+  float entropy_JXK_left = std::numeric_limits<float>::max();
+  float entropy_JXK_right = std::numeric_limits<float>::max();
+  float entropy_KXJ_top = std::numeric_limits<float>::max();
+  float entropy_KXJ_bottom = std::numeric_limits<float>::max();
+  float entropy_JXJ = std::numeric_limits<float>::max();
+
+  float temp_bit, temp_quant, temp_loss;
+
+  if (allow_JXK) {
+    if (row0[bx + cx + 0].Strategy() != acs_rawJXK) {
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+          acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
+          temp_bit, temp_quant, temp_loss));
+    }
+    if (row0[bx + cx + blocks_half].Strategy() != acs_rawJXK) {
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+          acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
+          temp_bit, temp_quant, temp_loss));
+    }
+  }
+
+  if (allow_KXJ) {
+    if (row0[bx + cx].Strategy() != acs_rawKXJ) {
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+          acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
+          temp_bit, temp_quant, temp_loss));
+    }
+    if (row1[bx + cx].Strategy() != acs_rawKXJ) {
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+          acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
+          temp_bit, temp_quant, temp_loss));
+    }
+  }
+
+  if (allow_square_transform) {
+    JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+        acsJXJ, entropy_mul_JXJ, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
+        cmap_factors, block, scratch_space, quantized, entropy_JXJ,
+        temp_bit, temp_quant, temp_loss));
+
+    static const float k8x8mul1 = -0.4;
+    static const float k8x8mul2 = 1.0;
+    static const float k8x8base = 1.4;
+    const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+    const float entropy_estimate_val = entropy_JXJ * mul8x8;
+
+    std::ofstream log_file("entropy_log.csv", std::ios::app);
+    if (log_file.is_open()) {
+        log_file << (bx + cx) * 8 << ","
+                 << (by + cy) * 8 << ","
+                 << AcStrategyTypeToString(acsJXJ.Strategy()) << ","
+                 << std::fixed << std::setprecision(6) << butteraugli_target << ","
+                 << encoding_speed_tier << ","
+                 << 1.0 << "," // BaseEntropyMul bu aşamada sabit varsayılabilir veya hesaplanan değer girilebilir
+                 << entropy_mul_JXJ << ","
+                 << cmap_factors[0] << ","
+                 << cmap_factors[2] << ","
+                 << config.info_loss_multiplier << ","
+                 << config.zeros_mul << ","
+                 << config.cost_delta << ","
+                 << temp_bit << ","
+                 << temp_quant << ","
+                 << temp_loss << ","
+                 << entropy_JXJ << ","
+                 << mul8x8 << ","
+                 << entropy_estimate_val << "\n";
+    }
+  }
+
+  float costJxN = std::min(entropy_JXK_left, entropy[0][0] + entropy[1][0]) +
+                  std::min(entropy_JXK_right, entropy[0][1] + entropy[1][1]);
+  float costNxJ = std::min(entropy_KXJ_top, entropy[0][0] + entropy[0][1]) +
+                  std::min(entropy_KXJ_bottom, entropy[1][0] + entropy[1][1]);
+
+  if (entropy_JXJ < costJxN && entropy_JXJ < costNxJ) {
+    JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawJXJ));
+    SetEntropyForTransform(cx, cy, acs_rawJXJ, entropy_JXJ, entropy_estimate);
+  } else if (costJxN < costNxJ) {
+    if (entropy_JXK_left < entropy[0][0] + entropy[1][0]) {
+      JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawJXK));
+      SetEntropyForTransform(cx, cy, acs_rawJXK, entropy_JXK_left,
+                             entropy_estimate);
+    }
+    if (entropy_JXK_right < entropy[0][1] + entropy[1][1]) {
+      JXL_RETURN_IF_ERROR(
+          ac_strategy->Set(bx + cx + blocks_half, by + cy, acs_rawJXK));
+      SetEntropyForTransform(cx + blocks_half, cy, acs_rawJXK,
+                             entropy_JXK_right, entropy_estimate);
+    }
+  } else {
+    if (entropy_KXJ_top < entropy[0][0] + entropy[0][1]) {
+      JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawKXJ));
+      SetEntropyForTransform(cx, cy, acs_rawKXJ, entropy_KXJ_top,
+                             entropy_estimate);
+    }
+    if (entropy_KXJ_bottom < entropy[1][0] + entropy[1][1]) {
+      JXL_RETURN_IF_ERROR(
+          ac_strategy->Set(bx + cx, by + cy + blocks_half, acs_rawKXJ));
+      SetEntropyForTransform(cx, cy + blocks_half, acs_rawKXJ,
+                             entropy_KXJ_bottom, entropy_estimate);
+    }
+  }
+  return true;
+}
 Status FindBestFirstLevelDivisionForSquare(
     size_t blocks, bool allow_square_transform, size_t bx, size_t by, size_t cx,
     size_t cy, const ACSConfig& config, const float* JXL_RESTRICT cmap_factors,
@@ -1424,10 +1671,17 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
               mt.type == AcStrategyType::DCT32X64) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 8 == 0) {
-              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-                  8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-                  mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
-                  scratch_space, quantized));
+              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+              //     8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+              //     mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
+              //     scratch_space, quantized));
+              if ((cy | cx) % 8 == 0) {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+                    8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+                    mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
+                    scratch_space, quantized,
+                    butteraugli_target, static_cast<int>(cparams.speed_tier))); // <--- Yeni parametreler
+              }
             }
             continue;
               } else if (mt.type == AcStrategyType::DCT32X16) {
@@ -1448,10 +1702,17 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           if (mt.type == AcStrategyType::DCT16X32) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 4 == 0) {
-              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-                  4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
-                  ac_strategy, mt.entropy_mul, entropy_mul32X32,
-                  entropy_estimate, block, scratch_space, quantized));
+              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+              //     4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
+              //     ac_strategy, mt.entropy_mul, entropy_mul32X32,
+              //     entropy_estimate, block, scratch_space, quantized));
+
+              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+                    4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
+                    ac_strategy, mt.entropy_mul, entropy_mul32X32,
+                    entropy_estimate, block, scratch_space, quantized,
+                    butteraugli_target, static_cast<int>(cparams.speed_tier)));
+
             }
             continue;
           } else if (mt.type == AcStrategyType::DCT32X16) {
@@ -1471,10 +1732,15 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           if (mt.type == AcStrategyType::DCT8X16) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 2 == 0) {
-              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-                  2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-                  mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
-                  scratch_space, quantized));
+              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+              //     2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+              //     mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
+              //     scratch_space, quantized));
+              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+                    2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+                    mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
+                    scratch_space, quantized,
+                    butteraugli_target, static_cast<int>(cparams.speed_tier)));
             }
             continue;
           } else if (mt.type == AcStrategyType::DCT16X8) {
@@ -1495,10 +1761,15 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
         // when there is an odd number of 8x8 blocks, then the last row
         // and column will get their DCT16X8s and DCT8X16s through the
         // normal integral transform merging process.
+        // JXL_RETURN_IF_ERROR(
+        //     TryMergeAcs(mt.type, bx, by, cx, cy, config, cmap_factors,
+        //                 ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
+        //                 entropy_estimate, block, scratch_space, quantized));
         JXL_RETURN_IF_ERROR(
-            TryMergeAcs(mt.type, bx, by, cx, cy, config, cmap_factors,
-                        ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
-                        entropy_estimate, block, scratch_space, quantized));
+    TryMergeAcsDebug(mt.type, bx, by, cx, cy, config, cmap_factors,
+                ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
+                entropy_estimate, block, scratch_space, quantized,
+                butteraugli_target, static_cast<int>(cparams.speed_tier)));
            }
          }
   }
@@ -1510,10 +1781,15 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   for (size_t cy = 0; cy + 1 < rect.ysize(); ++cy) {
     for (size_t cx = 0; cx + 1 < rect.xsize(); ++cx) {
       if ((cy | cx) % 2 != 0) {
-        JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-            2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-            entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
-            scratch_space, quantized));
+        // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+        //     2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+        //     entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
+        //     scratch_space, quantized));
+        JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+    2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+    entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
+    scratch_space, quantized,
+    butteraugli_target, static_cast<int>(cparams.speed_tier)));
       }
     }
   }
@@ -1524,10 +1800,15 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
       if ((cy | cx) % 4 == 0) {
         continue;  // Already tried with loop above (DCT16X32 case).
       }
-      JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-          4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-          entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
-          scratch_space, quantized));
+      // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+      //     4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+      //     entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
+      //     scratch_space, quantized));
+      JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+    4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+    entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
+    scratch_space, quantized,
+    butteraugli_target, static_cast<int>(cparams.speed_tier)));
     }
   }
   return true;
@@ -1638,13 +1919,153 @@ void CloseDebugDataFiles() {
 //ALPCOM: DEBUG END
 
 HWY_EXPORT(ProcessRectACS);
+// mul and mul2 represent a scaling difference between jxl and butteraugli.
+const float kSGmul = 226.77216153508914f;
+const float kSGmul2 = 1.0f / 73.377132366608819f;
+// Includes correction factor for std::log -> log2.
+const float kSGRetMul = kSGmul2 * 18.6580932135f * kInvLog2e;
+const float kSGVOffset = 7.7825991679894591f;
 
+template <bool invert, typename D, typename V>
+V RatioOfDerivativesOfCubicRootToSimpleGamma(const D d, V v) {
+  // The opsin space in jxl is the cubic root of photons, i.e., v * v * v
+  // is related to the number of photons.
+  //
+  // SimpleGamma(v * v * v) is the psychovisual space in butteraugli.
+  // This ratio allows quantization to move from jxl's opsin space to
+  // butteraugli's log-gamma space.
+  float kEpsilon = 1e-2;
+  v = ZeroIfNegative(v);
+  const auto kNumMul = Set(d, kSGRetMul * 3 * kSGmul);
+  const auto kVOffset = Set(d, kSGVOffset * kInvLog2e + kEpsilon);
+  const auto kDenMul = Set(d, kInvLog2e * kSGmul);
+
+  const auto v2 = Mul(v, v);
+
+  const auto num = MulAdd(kNumMul, v2, Set(d, kEpsilon));
+  const auto den = MulAdd(Mul(kDenMul, v), v2, kVOffset);
+  return invert ? Div(num, den) : Div(den, num);
+}
+
+template <bool invert = false>
+float RatioOfDerivativesOfCubicRootToSimpleGamma(float v) {
+  using DScalar = HWY_CAPPED(float, 1);
+  auto vscalar = Load(DScalar(), &v);
+  return GetLane(
+      RatioOfDerivativesOfCubicRootToSimpleGamma<invert>(DScalar(), vscalar));
+}
+template <typename D, typename V>
+V MaskingSqrt(const D d, V v) {
+  static const float kLogOffset = 27.505837037000106f;
+  static const float kMul = 211.66567973503678f;
+  const auto mul_v = Set(d, kMul * 1e8);
+  const auto offset_v = Set(d, kLogOffset);
+  return Mul(Set(d, 0.25f), Sqrt(MulAdd(v, Sqrt(mul_v), offset_v)));
+}
+
+float MaskingSqrt(const float v) {
+  using DScalar = HWY_CAPPED(float, 1);
+  auto vscalar = Load(DScalar(), &v);
+  return GetLane(MaskingSqrt(DScalar(), vscalar));
+}
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
                                   const ImageF& mask1x1,
                                   DequantMatrices* matrices) {
   //ALPCOM: DCT - KUANTALAMA CSV DEBUG
   OpenDebugDataFiles();
+{
+      std::ofstream dump_file("debug_masking_parameters.csv", std::ios::trunc);
+      if (dump_file.is_open()) {
+          dump_file << "BlockX,BlockY,Type";
+          for(int i=0; i<64; ++i) dump_file << ",Val" << i;
+          dump_file << "\n";
+
+          const size_t xsize = src.xsize();
+          const size_t ysize = src.ysize();
+          const size_t xsize_blocks = DivCeil(xsize, kBlockDim);
+          const size_t ysize_blocks = DivCeil(ysize, kBlockDim);
+
+          const float match_gamma_offset = 0.019;
+          const float kLimit = 0.2f;
+
+          for (size_t by = 0; by < ysize_blocks; ++by) {
+              for (size_t bx = 0; bx < xsize_blocks; ++bx) {
+
+                  dump_file << bx << "," << by << ",MASK1X1";
+                  for (size_t dy = 0; dy < 8; ++dy) {
+                      for (size_t dx = 0; dx < 8; ++dx) {
+                          size_t x = bx * 8 + dx;
+                          size_t y = by * 8 + dy;
+                          float val = (x < mask1x1.xsize() && y < mask1x1.ysize()) ? mask1x1.Row(y)[x] : 0.0f;
+                          dump_file << "," << std::fixed << std::setprecision(8) << val;
+                      }
+                  }
+                  dump_file << "\n";
+
+                  dump_file << bx << "," << by << ",DIFF1";
+                  for (size_t dy = 0; dy < 8; ++dy) {
+                      const size_t y = by * 8 + dy;
+
+                      const size_t y_c = y >= ysize ? ysize - 1 : y;
+                      const size_t y_t = y_c > 0 ? y_c - 1 : 0;
+                      const size_t y_b = y_c + 1 < ysize ? y_c + 1 : y_c;
+
+                      const float* row_c = src.ConstPlaneRow(1, y_c); // Y Kanalı
+                      const float* row_t = src.ConstPlaneRow(1, y_t);
+                      const float* row_b = src.ConstPlaneRow(1, y_b);
+
+                      for (size_t dx = 0; dx < 8; ++dx) {
+                          const size_t x = bx * 8 + dx;
+                          const size_t x_c = x >= xsize ? xsize - 1 : x;
+                          const size_t x_l = x_c > 0 ? x_c - 1 : 0;
+                          const size_t x_r = x_c + 1 < xsize ? x_c + 1 : x_c;
+
+                          float val_c = row_c[x_c];
+                          float base = 0.25f * (row_t[x_c] + row_b[x_c] + row_c[x_l] + row_c[x_r]);
+                          float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma(val_c + match_gamma_offset);
+
+                          float diff1 = std::abs(gammac * (val_c - base));
+                          dump_file << "," << diff1;
+                      }
+                  }
+                  dump_file << "\n";
+
+                  dump_file << bx << "," << by << ",DIFF2_RECALC";
+                  for (size_t dy = 0; dy < 8; ++dy) {
+                      const size_t y = by * 8 + dy;
+
+                      const size_t y_c = y >= ysize ? ysize - 1 : y;
+                      const size_t y_t = y_c > 0 ? y_c - 1 : 0;
+                      const size_t y_b = y_c + 1 < ysize ? y_c + 1 : y_c;
+
+                      const float* row_c = src.ConstPlaneRow(1, y_c);
+                      const float* row_t = src.ConstPlaneRow(1, y_t);
+                      const float* row_b = src.ConstPlaneRow(1, y_b);
+
+                      for (size_t dx = 0; dx < 8; ++dx) {
+                          const size_t x = bx * 8 + dx;
+                          const size_t x_c = x >= xsize ? xsize - 1 : x;
+                          const size_t x_l = x_c > 0 ? x_c - 1 : 0;
+                          const size_t x_r = x_c + 1 < xsize ? x_c + 1 : x_c;
+
+                          float val_c = row_c[x_c];
+                          float base = 0.25f * (row_t[x_c] + row_b[x_c] + row_c[x_l] + row_c[x_r]);
+                          float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma(val_c + match_gamma_offset);
+
+                          float diff = gammac * (val_c - base);
+                          diff *= diff;
+                          if (diff >= kLimit) diff = kLimit;
+                          diff = MaskingSqrt(diff);
+
+                          dump_file << "," << diff;
+                      }
+                  }
+                  dump_file << "\n";
+              }
+          }
+      }
+  }
   //ALPCOM: DEBUG END
   // ALPCOM: Masking field - CSV
   static bool mask_blocks_saved = false;
@@ -1821,6 +2242,9 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
   //ALPCOM: DCT - KUANTALAMA CSV DEBUG
   CloseDebugDataFiles();
   //ALPCOM: Debug End
+
+
+
 #if JXL_DEBUG_AC_STRATEGY
   {
     static bool debug_visual_saved = false;
