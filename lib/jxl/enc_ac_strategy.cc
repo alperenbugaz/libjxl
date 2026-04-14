@@ -879,10 +879,14 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
     {AcStrategyType::AFV2, 4, 0.81779489591359944},
     {AcStrategyType::AFV3, 4, 0.81779489591359944},
 };
-  // ALPCOM: CSV başlıKları
+  // ALPCOM: CSV başlıkları
+  bool needs_header;
+  {
+    std::ifstream check("entropy_log.csv");
+    needs_header = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+  }
   std::ofstream log_file("entropy_log.csv", std::ios::app);
-  if (log_file.tellp() == 0) {
-
+  if (needs_header && log_file.is_open()) {
     log_file << "BlockX,BlockY,TransformType,ButteraugliTarget,"
              << "EncodingSpeedTier,BaseEntropyMul,AdjustedEntropyMul,"
              << "CmapFactorYtoX,CmapFactorYtoB,ConfigInfoLossMul,"
