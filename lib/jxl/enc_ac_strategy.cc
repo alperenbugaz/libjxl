@@ -57,6 +57,7 @@ extern std::ofstream distortion_cost_file;
 extern std::ofstream pixel_distortion_file;
 extern std::ofstream quant_error_file;
 extern std::ofstream masking_blocks_file;
+extern std::ofstream entropy_log_file;
 
 void OpenDebugDataFiles();
 void CloseDebugDataFiles();
@@ -879,20 +880,8 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
     {AcStrategyType::AFV2, 4, 0.81779489591359944},
     {AcStrategyType::AFV3, 4, 0.81779489591359944},
 };
-  // ALPCOM: CSV başlıkları
-  bool needs_header;
-  {
-    std::ifstream check("entropy_log.csv");
-    needs_header = !check.good() || check.peek() == std::ifstream::traits_type::eof();
-  }
-  std::ofstream log_file("entropy_log.csv", std::ios::app);
-  if (needs_header && log_file.is_open()) {
-    log_file << "BlockX,BlockY,TransformType,ButteraugliTarget,"
-             << "EncodingSpeedTier,BaseEntropyMul,AdjustedEntropyMul,"
-             << "CmapFactorYtoX,CmapFactorYtoB,ConfigInfoLossMul,"
-             << "ConfigZerosMul,ConfigCostDelta,BitCost,QuantField,"
-             << "LossScalar,EntropyCost,mul8x8,EntropyEstimate\n";
-  }
+  // ALPCOM: Global entropy_log_file kullan (OpenDebugDataFiles'da açıldı)
+  std::ofstream& log_file = entropy_log_file;
   //ALPCOM: CSV için parametreler
   static const float k8x8mul1 = -0.4;
   static const float k8x8mul2 = 1.0;
@@ -907,7 +896,7 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
     }
     AcStrategy acs = AcStrategy::FromRawStrategy(tx.type);
 
-    float entropy_mul = tx.entropy_mul / kTransforms8x8[0].entropy_mul;
+    float entropy_mul = tx.entropy_mul / kTransforms8x8[0].entropy_mul; ///entropy_mul formülü
 
     if ((tx.type == AcStrategyType::DCT2X2 ||
          tx.type == AcStrategyType::IDENTITY) &&
@@ -1123,7 +1112,7 @@ Status TryMergeAcsDebug(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
   }
 
   float entropy_candidate;
-  float bit_cost, quant_field, loss_scalar;
+  float bit_cost = 0, quant_field = 0, loss_scalar = 0;
 
   JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
       acs, entropy_mul, (bx + cx) * 8, (by + cy) * 8, config, cmap_factors,
@@ -1136,15 +1125,13 @@ Status TryMergeAcsDebug(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
       static const float k8x8base = 1.4;
       const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
       const float entropy_estimate_val = entropy_candidate * mul8x8;
-
-      std::ofstream log_file("entropy_log.csv", std::ios::app);
-      if (log_file.is_open()) {
-        log_file << (bx + cx) * 8 << ","
+      if (entropy_log_file.is_open()) {
+        entropy_log_file << (bx + cx) * 8 << ","
                  << (by + cy) * 8 << ","
                  << AcStrategyTypeToString(acs.Strategy()) << ","
                  << std::fixed << std::setprecision(6) << butteraugli_target << ","
                  << encoding_speed_tier << ","
-                 << 1.0 << "," // BaseEntropyMul (Merge için tam bilinmiyor, 1.0 placeholder)
+                 << 1.0 << ","
                  << entropy_mul << ","
                  << cmap_factors[0] << ","
                  << cmap_factors[2] << ","
@@ -1292,35 +1279,47 @@ Status FindBestFirstLevelDivisionForSquareDebug(
   float entropy_KXJ_bottom = std::numeric_limits<float>::max();
   float entropy_JXJ = std::numeric_limits<float>::max();
 
-  float temp_bit, temp_quant, temp_loss;
+  float temp_bit = 0, temp_quant = 0, temp_loss = 0;
 
   if (allow_JXK) {
     if (row0[bx + cx + 0].Strategy() != acs_rawJXK) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      //     acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
+      //     cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
+      //     temp_bit, temp_quant, temp_loss));
+      JXL_RETURN_IF_ERROR(EstimateEntropy(
           acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
-          temp_bit, temp_quant, temp_loss));
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_left));
     }
     if (row0[bx + cx + blocks_half].Strategy() != acs_rawJXK) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      //     acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
+      //     cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
+      //     temp_bit, temp_quant, temp_loss));
+      JXL_RETURN_IF_ERROR(EstimateEntropy(
           acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
-          temp_bit, temp_quant, temp_loss));
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_right));
     }
   }
 
   if (allow_KXJ) {
     if (row0[bx + cx].Strategy() != acs_rawKXJ) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      //     acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
+      //     cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
+      //     temp_bit, temp_quant, temp_loss));
+      JXL_RETURN_IF_ERROR(EstimateEntropy(
           acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
-          temp_bit, temp_quant, temp_loss));
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top));
     }
     if (row1[bx + cx].Strategy() != acs_rawKXJ) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
+      //     acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
+      //     cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
+      //     temp_bit, temp_quant, temp_loss));
+      JXL_RETURN_IF_ERROR(EstimateEntropy(
           acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
-          temp_bit, temp_quant, temp_loss));
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom));
     }
   }
 
@@ -1335,15 +1334,13 @@ Status FindBestFirstLevelDivisionForSquareDebug(
     static const float k8x8base = 1.4;
     const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
     const float entropy_estimate_val = entropy_JXJ * mul8x8;
-
-    std::ofstream log_file("entropy_log.csv", std::ios::app);
-    if (log_file.is_open()) {
-        log_file << (bx + cx) * 8 << ","
+    if (entropy_log_file.is_open()) {
+        entropy_log_file << (bx + cx) * 8 << ","
                  << (by + cy) * 8 << ","
                  << AcStrategyTypeToString(acsJXJ.Strategy()) << ","
                  << std::fixed << std::setprecision(6) << butteraugli_target << ","
                  << encoding_speed_tier << ","
-                 << 1.0 << "," // BaseEntropyMul bu aşamada sabit varsayılabilir veya hesaplanan değer girilebilir
+                 << 1.0 << ","
                  << entropy_mul_JXJ << ","
                  << cmap_factors[0] << ","
                  << cmap_factors[2] << ","
@@ -1595,6 +1592,10 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
           butteraugli_target, config, cmap_factors, ac_strategy, block,
           scratch_space, quantized, &entropy, best_of_8x8s));
+      // JXL_RETURN_IF_ERROR(FindBest8x8Transform(
+      //     8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
+      //     butteraugli_target, config, cmap_factors, ac_strategy, block,
+      //     scratch_space, quantized, &entropy, best_of_8x8s));
       JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + ix, by + iy, best_of_8x8s));
 
       //ALPCOM: Formül 2
@@ -1861,8 +1862,17 @@ std::ofstream distortion_cost_file;
 std::ofstream pixel_distortion_file;
 std::ofstream quant_error_file;
 std::ofstream masking_blocks_file;
+std::ofstream entropy_log_file;
 
 void OpenDebugDataFiles() {
+  entropy_log_file.open("entropy_log.csv", std::ios::trunc);
+  if (entropy_log_file.is_open()) {
+    entropy_log_file << "BlokX,BlokY,AcStrategyType,butteraugli_target,"
+                     << "EncodingSpeedTier,Temel_entropy_mul,entropy_mul,"
+                     << "CMapFaktor_X,CMapFaktor_B,Info_Loss,"
+                     << "Zeros_Mul,CostDelta,Kodlama_Maliyeti,quant_norm16,"
+                     << "Loss_Scalar,Maliyet,mul8x8,Son_Maliyet\n";
+  }
   dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
   sparsity_cost_file.open("debug_sparsity_cost.csv", std::ios::trunc);
   quantized_coeffs_file.open("debug_quantized_coeffs.csv", std::ios::trunc);
@@ -1918,6 +1928,7 @@ void CloseDebugDataFiles() {
   if (sparsity_cost_file.is_open()) sparsity_cost_file.close();
   if (distortion_cost_file.is_open()) distortion_cost_file.close();
   if (masking_blocks_file.is_open()) masking_blocks_file.close();
+  if (entropy_log_file.is_open()) entropy_log_file.close();
 }
 
 //ALPCOM: DEBUG END
