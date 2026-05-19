@@ -301,6 +301,9 @@ set(JPEGXL_INTERNAL_ENC_SOURCES
   jxl/butteraugli/butteraugli.h
   jxl/enc_ac_strategy.cc
   jxl/enc_ac_strategy.h
+  jxl/enc_ac_strategy_debug.cc
+  jxl/enc_ac_strategy_debug.h
+  jxl/enc_ac_strategy_debug-inl.h
   jxl/enc_adaptive_quantization.cc
   jxl/enc_adaptive_quantization.h
   jxl/enc_ans.cc

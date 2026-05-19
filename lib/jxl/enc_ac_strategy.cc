@@ -34,35 +34,11 @@
 #include "lib/jxl/enc_aux_out.h"
 #include "lib/jxl/enc_debug_image.h"
 #include "lib/jxl/enc_params.h"
+#include "lib/jxl/enc_ac_strategy_debug.h"
+#include "lib/jxl/enc_ac_strategy_debug-inl.h"
 #include "lib/jxl/enc_transforms-inl.h"
 #include "lib/jxl/simd_util.h"
 
-#include <fstream>
-#include <iomanip>
-
-//ALPCOM: DCT - KUANTALAMA CSV DEBUG
-#include <iostream>
-#include <random>
-#include <vector>
-#include <mutex>
-#include "lib/jxl/enc_xyb.h"
-namespace jxl {
-extern std::ofstream dct_coeffs_file;
-extern std::ofstream quantized_coeffs_file;
-extern std::ofstream quant_field_file;
-extern std::ofstream quant_matrices_file;
-extern std::ofstream pre_quant_coeffs_file;
-extern std::ofstream sparsity_cost_file;
-extern std::ofstream distortion_cost_file;
-extern std::ofstream pixel_distortion_file;
-extern std::ofstream quant_error_file;
-extern std::ofstream masking_blocks_file;
-extern std::ofstream entropy_log_file;
-
-void OpenDebugDataFiles();
-void CloseDebugDataFiles();
-}
-//ALPCOM: End Debug
 // Some of the floating point constants in this file and in other
 // files in the libjxl project have been obtained using the
 // tools/optimizer/simplex_fork.py tool. It is a variation of
@@ -78,7 +54,7 @@ void CloseDebugDataFiles();
 
 // Set JXL_DEBUG_AC_STRATEGY to 1 to enable debugging.
 #ifndef JXL_DEBUG_AC_STRATEGY
-#define JXL_DEBUG_AC_STRATEGY 1
+#define JXL_DEBUG_AC_STRATEGY 0
 #endif
 
 // This must come before the begin/end_target, but HWY_ONCE is only true
@@ -555,409 +531,6 @@ Status EstimateEntropy(const AcStrategy& acs, float entropy_mul, size_t x,
   //Formül (3)
   return true;
 }
-std::string AcStrategyTypeToString(AcStrategyType type) {
-  switch (type) {
-    case AcStrategyType::DCT: return "DCT";
-    case AcStrategyType::IDENTITY: return "IDENTITY";
-    case AcStrategyType::DCT2X2: return "DCT2X2";
-    case AcStrategyType::DCT4X4: return "DCT4X4";
-    case AcStrategyType::DCT16X16: return "DCT16X16";
-    case AcStrategyType::DCT32X32: return "DCT32X32";
-    case AcStrategyType::DCT16X8: return "DCT16X8";
-    case AcStrategyType::DCT8X16: return "DCT8X16";
-    case AcStrategyType::DCT32X8: return "DCT32X8";
-    case AcStrategyType::DCT8X32: return "DCT8X32";
-    case AcStrategyType::DCT32X16: return "DCT32X16";
-    case AcStrategyType::DCT16X32: return "DCT16X32";
-    case AcStrategyType::DCT4X8: return "DCT4X8";
-    case AcStrategyType::DCT8X4: return "DCT8X4";
-    case AcStrategyType::AFV0: return "AFV0";
-    case AcStrategyType::AFV1: return "AFV1";
-    case AcStrategyType::AFV2: return "AFV2";
-    case AcStrategyType::AFV3: return "AFV3";
-    case AcStrategyType::DCT64X64: return "DCT64X64";
-    case AcStrategyType::DCT64X32: return "DCT64X32";
-    case AcStrategyType::DCT32X64: return "DCT32X64";
-    case AcStrategyType::DCT128X128: return "DCT128X128";
-    case AcStrategyType::DCT128X64: return "DCT128X64";
-    case AcStrategyType::DCT64X128: return "DCT64X128";
-    case AcStrategyType::DCT256X256: return "DCT256X256";
-    case AcStrategyType::DCT256X128: return "DCT256X128";
-    case AcStrategyType::DCT128X256: return "DCT128X256";
-
-    default:
-      return "UNKNOWN";
-  }
-}
-
-
-Status EstimateEntropyDebug(const AcStrategy& acs, float entropy_mul, size_t x,
-                       size_t y, const ACSConfig& config,
-                       const float* JXL_RESTRICT cmap_factors, float* block,
-                       float* full_scratch_space, uint32_t* quantized,
-                       float& entropy,
-                       // YENİ EKLENEN OUTPUT PARAMETRELERİ
-                       float& bit_cost_out,
-                       float& quant_norm_out,
-                       float& loss_scalar_out
-                       ) {
-  // entropy değişkenini, bit maliyetini biriktirmek için kullanacağız.
-  float bit_cost = 0.0f;
-  float* mem = full_scratch_space;
-  float* scratch_space = full_scratch_space + AcStrategy::kMaxCoeffArea;
-  const size_t size = (1 << acs.log2_covered_blocks()) * kDCTBlockSize;
-
-  //ALPCOM: X Y B ayrı ayrı piksel verisinden dönüşüme uğrar (stratejiye göre) her kanalın dönüşüm sonucu block dizisine yazılır.
-
-  for (size_t c = 0; c < 3; c++) {
-    float* JXL_RESTRICT block_c = block + size * c;
-    TransformFromPixels(acs.Strategy(), &config.Pixel(c, x, y),
-                        config.src_stride, block_c, scratch_space);
-
-    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-    if (dct_coeffs_file.is_open()) {
-      dct_coeffs_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy());
-      for (size_t i = 0; i < size; ++i) {
-        dct_coeffs_file << "," << std::fixed << std::setprecision(8) << block_c[i];
-      }
-      dct_coeffs_file << "\n";
-    }
-
-    //ALPCOM: Debug end
-  }
-  HWY_FULL(float) df;
-
-  const size_t num_blocks = acs.covered_blocks_x() * acs.covered_blocks_y();
-  float quant_norm16 = 0;
-  if (num_blocks == 1) {
-    quant_norm16 = config.Quant(x / 8, y / 8);
-  } else if (num_blocks == 2) {
-    if (acs.covered_blocks_y() == 2) {
-      quant_norm16 =
-          std::max(config.Quant(x / 8, y / 8), config.Quant(x / 8, y / 8 + 1));
-    } else {
-      quant_norm16 =
-          std::max(config.Quant(x / 8, y / 8), config.Quant(x / 8 + 1, y / 8));
-    }
-  } else {
-    for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
-      for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
-        float qval = config.Quant(x / 8 + ix, y / 8 + iy);
-        qval *= qval;
-        qval *= qval;
-        qval *= qval;
-        quant_norm16 += qval * qval;
-      }
-    }
-    quant_norm16 /= num_blocks;
-    quant_norm16 = FastPowf(quant_norm16, 1.0f / 16.0f);
-  }
-
-
-
-  const auto quant = Set(df, quant_norm16);
-
-  const HWY_CAPPED(float, 8) df8;
-  auto loss = Zero(df8);
-  float unmultiplied_lossc_values[3] = {0.0f, 0.0f, 0.0f};
-  for (size_t c = 0; c < 3; c++) {
-    const float* inv_matrix = config.dequant->InvMatrix(acs.Strategy(), c);
-    const float* matrix = config.dequant->Matrix(acs.Strategy(), c);
-    if (quant_matrices_file.is_open()) {
-      quant_matrices_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy()) << ",matrix";
-      for (size_t i = 0; i < size; ++i) {
-        quant_matrices_file << "," << std::fixed << std::setprecision(8) << matrix[i];
-      }
-      quant_matrices_file << "\n";
-
-      quant_matrices_file << x << "," << y << "," << c << "," << AcStrategyTypeToString(acs.Strategy()) << ",inv_matrix";
-      for (size_t i = 0; i < size; ++i) {
-        quant_matrices_file << "," << std::fixed << std::setprecision(8) << inv_matrix[i];
-      }
-      quant_matrices_file << "\n";
-    }
-
-    if (quant_field_file.is_open()) {
-      quant_field_file << x << "," << y << "," << c << "," << quant_norm16 << "\n";
-    }
-    const auto cmap_factor = Set(df, cmap_factors[c]);
-
-    auto entropy_v = Zero(df);
-    auto nzeros_v = Zero(df);
-    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-    std::vector<int32_t> quantized_coeffs_for_log;
-    quantized_coeffs_for_log.reserve(size);
-
-    std::vector<float> pre_quant_coeffs_for_log;
-    pre_quant_coeffs_for_log.reserve(size);
-
-    std::vector<float> quant_error_for_log;
-    quant_error_for_log.reserve(size);
-    //ALPCOM: Debug End
-
-    for (size_t i = 0; i < num_blocks * kDCTBlockSize; i += Lanes(df)) {
-      const auto in = Load(df, block + c * size + i); //frekans katsayıları
-      const auto in_y = Mul(Load(df, block + size + i), cmap_factor); //y kanalından tahmin edilen değer
-      const auto im = Load(df, inv_matrix + i); //Ters kuantalama matrisinden gelen görselin önemini belirten ağırlıklar
-      const auto val = Mul(Sub(in, in_y), Mul(im, quant)); //ölçeklenmiş frekans katsayısı
-      const auto rval = Round(val); //Kuantalanmış Katsayı
-
-      //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-      HWY_ALIGN float temp_pre_quant_vals[hwy::kMaxVectorSize / sizeof(float)];
-      Store(val, df, temp_pre_quant_vals);
-      for(size_t j = 0; j < Lanes(df); ++j) {
-        pre_quant_coeffs_for_log.push_back(temp_pre_quant_vals[j]);
-      }
-
-      HWY_ALIGN int32_t temp_quant_vals[hwy::kMaxVectorSize / sizeof(float)];
-      const HWY_FULL(int32_t) di;
-      Store(ConvertTo(di, rval), di, temp_quant_vals);
-      for(size_t j = 0; j < Lanes(df); ++j) {
-        quantized_coeffs_for_log.push_back(temp_quant_vals[j]);
-      }
-      //ALPCOM: Debug End
-
-      const auto diff = Sub(val, rval);
-      const auto m = Load(df, matrix + i);
-      Store(Mul(m, diff), df, &mem[i]);
-      const auto q = Abs(rval);
-      const auto q_is_zero = Eq(q, Zero(df));
-      entropy_v = Add(Sqrt(q), entropy_v);
-      nzeros_v = Add(nzeros_v, IfThenZeroElse(q_is_zero, Set(df, 1.0f)));
-
-      //ALPCOM: Diff değeri loglama
-      HWY_ALIGN float temp_diff_vals[hwy::kMaxVectorSize / sizeof(float)];
-      Store(diff, df, temp_diff_vals);
-      for(size_t j = 0; j < Lanes(df); ++j) {
-        quant_error_for_log.push_back(temp_diff_vals[j]);
-      }
-      //ALPCOM: Debug End
-    }
-    //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-
-    if (pre_quant_coeffs_file.is_open()) {
-      pre_quant_coeffs_file << x << "," << y << "," << c
-                            << "," << AcStrategyTypeToString(acs.Strategy());
-      for (const auto& coeff : pre_quant_coeffs_for_log) {
-        pre_quant_coeffs_file << "," << std::fixed << std::setprecision(8) << coeff;
-      }
-      pre_quant_coeffs_file << "\n";
-    }
-    if (quantized_coeffs_file.is_open()) {
-      quantized_coeffs_file << x << "," << y << "," << c
-                            << "," << AcStrategyTypeToString(acs.Strategy());
-
-      for (const auto& coeff : quantized_coeffs_for_log) {
-        quantized_coeffs_file << "," << coeff;
-      }
-      quantized_coeffs_file << "\n";
-    }
-    if (quant_error_file.is_open()) {
-      quant_error_file << x << "," << y << "," << c
-                       << "," << AcStrategyTypeToString(acs.Strategy());
-      for (const auto& coeff : quant_error_for_log) {
-        quant_error_file << "," << std::fixed << std::setprecision(8) << coeff;
-      }
-      quant_error_file << "\n";
-    }
-    //ALPCOM: Debug End
-
-    {
-      float masku_lut[3] = {12.0, 0.0, 4.0};
-      auto masku_off = Set(df8, masku_lut[c]);
-      auto lossc = Zero(df8);
-      TransformToPixels(acs.Strategy(), &mem[0], block,
-                        acs.covered_blocks_x() * 8, scratch_space);
-      if (pixel_distortion_file.is_open()) {
-        pixel_distortion_file << x << "," << y << "," << c
-                              << "," << AcStrategyTypeToString(acs.Strategy());
-        for (size_t i = 0; i < size; ++i) {
-          pixel_distortion_file << "," << std::fixed << std::setprecision(8) << block[i];
-        }
-        pixel_distortion_file << "\n";
-      }
-      for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
-        for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
-          for (size_t dy = 0; dy < kBlockDim; ++dy) {
-            for (size_t dx = 0; dx < kBlockDim; dx += Lanes(df8)) {
-              auto in = Load(df8, block +
-                                      (iy * kBlockDim + dy) *
-                                          (acs.covered_blocks_x() * kBlockDim) +
-                                      ix * kBlockDim + dx);
-              if (x + ix * 8 + dx + Lanes(df8) <= config.mask1x1_xsize) {
-                auto masku =
-                    Add(Load(df8, config.MaskingPtr1x1(x + ix * 8 + dx,
-                                                       y + iy * 8 + dy)),
-                        masku_off);
-                in = Mul(masku, in);
-                in = Mul(in, in);
-                in = Mul(in, in);
-                in = Mul(in, in);
-                lossc = Add(lossc, in);
-              }
-            }
-          }
-        }
-      }
-      unmultiplied_lossc_values[c] = GetLane(SumOfLanes(df8, lossc));
-      static const double kChannelMul[3] = {pow(8.2, 8.0), pow(1.0, 8.0),
-                                            pow(1.03, 8.0)};
-      lossc = Mul(Set(df8, kChannelMul[c]), lossc);
-      loss = Add(loss, lossc);
-    }
-    bit_cost += config.cost_delta * GetLane(SumOfLanes(df, entropy_v));
-    size_t num_nzeros = GetLane(SumOfLanes(df, nzeros_v));
-    size_t nbits = CeilLog2Nonzero(num_nzeros + 1) + 1;
-
-    if (sparsity_cost_file.is_open()) {
-      sparsity_cost_file << x << "," << y << "," << c
-                         << "," << AcStrategyTypeToString(acs.Strategy())
-                         << "," << num_nzeros
-                         << "," << nbits << "\n";
-    }
-    bit_cost += config.zeros_mul * (CeilLog2Nonzero(nbits + 17) + nbits);
-    if (c == 0 && num_blocks >= 2) {
-      float w = 1.0 + std::min(3.0, num_blocks / 8.0);
-      bit_cost *= w;
-      loss = Mul(loss, Set(df8, w));
-    }
-  }
-  const float total_raw_loss = GetLane(SumOfLanes(df8, loss));
-  float loss_scalar =
-      pow(GetLane(SumOfLanes(df8, loss)) / (num_blocks * kDCTBlockSize),
-          1.0f / 8.0f) *
-      (num_blocks * kDCTBlockSize) / quant_norm16;
-  if (distortion_cost_file.is_open()) {
-    static const double kChannelMul[3] = {pow(8.2, 8.0), pow(1.0, 8.0),
-                                          pow(1.03, 8.0)};
-    const float final_distortion_cost = config.info_loss_multiplier * loss_scalar;
-
-    distortion_cost_file << x << "," << y << "," << AcStrategyTypeToString(acs.Strategy())
-                         << "," << std::fixed << std::setprecision(8)
-                         << unmultiplied_lossc_values[0]
-                         << "," << unmultiplied_lossc_values[1]
-                         << "," << unmultiplied_lossc_values[2]
-                         << "," << kChannelMul[0]
-                         << "," << kChannelMul[1]
-                         << "," << kChannelMul[2]
-                         << "," << total_raw_loss
-                         << "," << num_blocks * kDCTBlockSize
-                         << "," << quant_norm16
-                         << "," << loss_scalar
-                         << "," << config.info_loss_multiplier
-                         << "," << final_distortion_cost << "\n";
-  }
-  // ALPCOM: Çıkış parametrelerini doldur
-  bit_cost_out = bit_cost;
-  loss_scalar_out = loss_scalar;
-
-  // Nihai entropiyi (EntropyCost) hesapla
-  entropy = (bit_cost * entropy_mul) + (config.info_loss_multiplier * loss_scalar);
-  return true;
-}
-
-Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
-                            float butteraugli_target, const ACSConfig& config,
-                            const float* JXL_RESTRICT cmap_factors,
-                            AcStrategyImage* JXL_RESTRICT ac_strategy,
-                            float* block, float* scratch_space,
-                            uint32_t* quantized, float* entropy_out,
-                            AcStrategyType& best_tx) {
-  struct TransformTry8x8 {
-    AcStrategyType type;
-    int encoding_speed_tier_max_limit;
-    double entropy_mul;
-  };
-  static const TransformTry8x8 kTransforms8x8[] = {
-    {AcStrategyType::DCT, 9, 0.8},
-    {AcStrategyType::DCT4X4, 5, 1.08},
-    {AcStrategyType::DCT2X2, 5, 0.95},
-    {AcStrategyType::DCT4X8, 4, 0.85931637428340035},
-    {AcStrategyType::DCT8X4, 4, 0.85931637428340035},
-    {AcStrategyType::IDENTITY, 5, 1.0427542510634957},
-    {AcStrategyType::AFV0, 4, 0.81779489591359944},
-    {AcStrategyType::AFV1, 4, 0.81779489591359944},
-    {AcStrategyType::AFV2, 4, 0.81779489591359944},
-    {AcStrategyType::AFV3, 4, 0.81779489591359944},
-};
-  // ALPCOM: Global entropy_log_file kullan (OpenDebugDataFiles'da açıldı)
-  std::ofstream& log_file = entropy_log_file;
-  //ALPCOM: CSV için parametreler
-  static const float k8x8mul1 = -0.4;
-  static const float k8x8mul2 = 1.0;
-  static const float k8x8base = 1.4;
-  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
-  //
-  double best = 1e30;
-  best_tx = kTransforms8x8[0].type;
-  for (auto tx : kTransforms8x8) {
-    if (tx.encoding_speed_tier_max_limit < encoding_speed_tier) {
-      continue;
-    }
-    AcStrategy acs = AcStrategy::FromRawStrategy(tx.type);
-
-    float entropy_mul = tx.entropy_mul / kTransforms8x8[0].entropy_mul; ///entropy_mul formülü
-
-    if ((tx.type == AcStrategyType::DCT2X2 ||
-         tx.type == AcStrategyType::IDENTITY) &&
-        butteraugli_target < 5.0) {
-      static const float kFavor2X2AtHighQuality = 0.4;
-      float weight = pow((5.0f - butteraugli_target) / 5.0f, 2.0f);
-      entropy_mul -= kFavor2X2AtHighQuality * weight;
-        }
-    if ((tx.type != AcStrategyType::DCT && tx.type != AcStrategyType::DCT2X2 &&
-         tx.type != AcStrategyType::IDENTITY) &&
-        butteraugli_target > 4.0) {
-      static const float kAvoidEntropyOfTransforms = 0.5;
-      float mul = 1.0;
-      if (butteraugli_target < 12.0) {
-        mul *= (12.0 - 4.0) / (butteraugli_target - 4.0);
-      }
-      entropy_mul += kAvoidEntropyOfTransforms * mul;
-        }
-
-    float entropy_cost; //ALPCOM: Nihai maliyeti tutacak (EntropyCost)
-
-    float bit_cost, quant_field, loss_scalar;
-
-    // ALPCOM: EstimateEntropyDebug çağrısı
-    JXL_RETURN_IF_ERROR(EstimateEntropyDebug(acs, entropy_mul, x, y, config,
-                                        cmap_factors, block, scratch_space,
-                                        quantized, entropy_cost,
-                                        bit_cost, quant_field, loss_scalar));
-
-    if (log_file.is_open()) {
-      const float entropy_estimate_val = entropy_cost * mul8x8;
-
-      log_file << x << ","
-               << y << ","
-               << AcStrategyTypeToString(acs.Strategy())<< ","
-               << std::fixed << std::setprecision(6) << butteraugli_target << ","
-               << encoding_speed_tier << ","
-               << tx.entropy_mul << ","
-               << entropy_mul << ","
-               << cmap_factors[0] << ","
-               << cmap_factors[2] << ","
-               << config.info_loss_multiplier << ","
-               << config.zeros_mul << ","
-               << config.cost_delta << ","
-               << bit_cost << ","
-               << quant_field << ","
-               << loss_scalar << ","
-               << entropy_cost << ","
-               << mul8x8 << ","
-               << entropy_estimate_val << ","
-               << "FB8X8" << "\n";
-    }
-
-    if (entropy_cost < best) {
-      best_tx = tx.type;
-      best = entropy_cost;
-    }
-  }
-  *entropy_out = best;
-  return true;
-}
 
 
 AcStrategyType AcsSquare(size_t blocks) {
@@ -1092,76 +665,6 @@ Status FindBest8x8Transform(size_t x, size_t y, int encoding_speed_tier,
 // cx, cy addresses the left, upper 8x8 block position of the candidate
 // transform.
 
-Status TryMergeAcsDebug(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
-                   size_t cy, const ACSConfig& config,
-                   const float* JXL_RESTRICT cmap_factors,
-                   AcStrategyImage* JXL_RESTRICT ac_strategy,
-                   const float entropy_mul, const uint8_t candidate_priority,
-                   uint8_t* priority, float* JXL_RESTRICT entropy_estimate,
-                   float* block, float* scratch_space, uint32_t* quantized,
-                   float butteraugli_target,
-                   int encoding_speed_tier) {
-  AcStrategy acs = AcStrategy::FromRawStrategy(acs_raw);
-  float entropy_current = 0;
-  for (size_t iy = 0; iy < acs.covered_blocks_y(); ++iy) {
-    for (size_t ix = 0; ix < acs.covered_blocks_x(); ++ix) {
-      if (priority[(cy + iy) * 8 + (cx + ix)] >= candidate_priority) {
-        return true;
-      }
-      entropy_current += entropy_estimate[(cy + iy) * 8 + (cx + ix)];
-    }
-  }
-
-  float entropy_candidate;
-  float bit_cost = 0, quant_field = 0, loss_scalar = 0;
-
-  JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-      acs, entropy_mul, (bx + cx) * 8, (by + cy) * 8, config, cmap_factors,
-      block, scratch_space, quantized, entropy_candidate,
-      bit_cost, quant_field, loss_scalar));
-
-  {
-      static const float k8x8mul1 = -0.4;
-      static const float k8x8mul2 = 1.0;
-      static const float k8x8base = 1.4;
-      const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
-      const float entropy_estimate_val = entropy_candidate * mul8x8;
-      if (entropy_log_file.is_open()) {
-        entropy_log_file << (bx + cx) * 8 << ","
-                 << (by + cy) * 8 << ","
-                 << AcStrategyTypeToString(acs.Strategy()) << ","
-                 << std::fixed << std::setprecision(6) << butteraugli_target << ","
-                 << encoding_speed_tier << ","
-                 << 1.0 << ","
-                 << entropy_mul << ","
-                 << cmap_factors[0] << ","
-                 << cmap_factors[2] << ","
-                 << config.info_loss_multiplier << ","
-                 << config.zeros_mul << ","
-                 << config.cost_delta << ","
-                 << bit_cost << ","
-                 << quant_field << ","
-                 << loss_scalar << ","
-                 << entropy_candidate << ","
-                 << mul8x8 << ","
-                 << entropy_estimate_val << ","
-                 << "TRYMERGE" << "\n";
-      }
-  }
-
-  if (entropy_candidate >= entropy_current) return true;
-
-  // Accept the candidate.
-  for (size_t iy = 0; iy < acs.covered_blocks_y(); iy++) {
-    for (size_t ix = 0; ix < acs.covered_blocks_x(); ix++) {
-      entropy_estimate[(cy + iy) * 8 + cx + ix] = 0;
-      priority[(cy + iy) * 8 + cx + ix] = candidate_priority;
-    }
-  }
-  JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_raw));
-  entropy_estimate[cy * 8 + cx] = entropy_candidate;
-  return true;
-}
 
 
 Status TryMergeAcs(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
@@ -1201,9 +704,9 @@ Status TryMergeAcs(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
   return true;
 }
 
-static void SetEntropyForTransform(size_t cx, size_t cy,
-                                   const AcStrategyType acs_raw, float entropy,
-                                   float* JXL_RESTRICT entropy_estimate) {
+void SetEntropyForTransform(size_t cx, size_t cy, AcStrategyType acs_raw,
+                            float entropy,
+                            float* JXL_RESTRICT entropy_estimate) {
   const AcStrategy acs = AcStrategy::FromRawStrategy(acs_raw);
   for (size_t dy = 0; dy < acs.covered_blocks_y(); ++dy) {
     for (size_t dx = 0; dx < acs.covered_blocks_x(); ++dx) {
@@ -1221,180 +724,6 @@ static void SetEntropyForTransform(size_t cx, size_t cy,
 //
 // This is now generalized to concern about squares
 // of blocks X blocks size, where a block is 8x8 pixels.
-Status FindBestFirstLevelDivisionForSquareDebug(
-    size_t blocks,
-    bool allow_square_transform,
-    size_t bx, size_t by,
-    size_t cx, size_t cy,
-    const ACSConfig& config,
-    const float* JXL_RESTRICT cmap_factors,
-    AcStrategyImage* JXL_RESTRICT ac_strategy,
-    const float entropy_mul_JXK,
-    const float entropy_mul_JXJ,
-    float* JXL_RESTRICT entropy_estimate,
-    float* block,
-    float* scratch_space,
-    uint32_t* quantized,
-    float butteraugli_target,
-    int encoding_speed_tier
-    ) {
-
-  const size_t blocks_half = blocks / 2;
-  const AcStrategyType acs_rawJXK = AcsVerticalSplit(blocks);
-  const AcStrategyType acs_rawKXJ = AcsHorizontalSplit(blocks);
-  const AcStrategyType acs_rawJXJ = AcsSquare(blocks);
-
-  const AcStrategy acsJXK = AcStrategy::FromRawStrategy(acs_rawJXK);
-  const AcStrategy acsKXJ = AcStrategy::FromRawStrategy(acs_rawKXJ);
-  const AcStrategy acsJXJ = AcStrategy::FromRawStrategy(acs_rawJXJ);
-
-  AcStrategyRow row0 = ac_strategy->ConstRow(by + cy + 0);
-  AcStrategyRow row1 = ac_strategy->ConstRow(by + cy + blocks_half);
-
-  if (MultiBlockTransformCrossesHorizontalBoundary(*ac_strategy, bx + cx,
-                                                   by + cy, bx + cx + blocks) ||
-      MultiBlockTransformCrossesHorizontalBoundary(
-          *ac_strategy, bx + cx, by + cy + blocks, bx + cx + blocks) ||
-      MultiBlockTransformCrossesVerticalBoundary(*ac_strategy, bx + cx, by + cy,
-                                                 by + cy + blocks) ||
-      MultiBlockTransformCrossesVerticalBoundary(*ac_strategy, bx + cx + blocks,
-                                                 by + cy, by + cy + blocks)) {
-    return true;
-  }
-
-  const bool allow_JXK = !MultiBlockTransformCrossesVerticalBoundary(
-      *ac_strategy, bx + cx + blocks_half, by + cy, by + cy + blocks);
-  const bool allow_KXJ = !MultiBlockTransformCrossesHorizontalBoundary(
-      *ac_strategy, bx + cx, by + cy + blocks_half, bx + cx + blocks);
-
-  float entropy[2][2] = {};
-  for (size_t dy = 0; dy < blocks; ++dy) {
-    for (size_t dx = 0; dx < blocks; ++dx) {
-      entropy[dy / blocks_half][dx / blocks_half] +=
-          entropy_estimate[(cy + dy) * 8 + (cx + dx)];
-    }
-  }
-
-  float entropy_JXK_left = std::numeric_limits<float>::max();
-  float entropy_JXK_right = std::numeric_limits<float>::max();
-  float entropy_KXJ_top = std::numeric_limits<float>::max();
-  float entropy_KXJ_bottom = std::numeric_limits<float>::max();
-  float entropy_JXJ = std::numeric_limits<float>::max();
-
-  float temp_bit = 0, temp_quant = 0, temp_loss = 0;
-
-  static const float k8x8mul1 = -0.4;
-  static const float k8x8mul2 = 1.0;
-  static const float k8x8base = 1.4;
-  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
-
-  auto log_entropy_row = [&](size_t px, size_t py, AcStrategyType type,
-                             float entropy_mul, float entropy_val,
-                             const char* source) {
-    if (!entropy_log_file.is_open()) return;
-    entropy_log_file << px << ","
-             << py << ","
-             << AcStrategyTypeToString(type) << ","
-             << std::fixed << std::setprecision(6) << butteraugli_target << ","
-             << encoding_speed_tier << ","
-             << 1.0 << ","
-             << entropy_mul << ","
-             << cmap_factors[0] << ","
-             << cmap_factors[2] << ","
-             << config.info_loss_multiplier << ","
-             << config.zeros_mul << ","
-             << config.cost_delta << ","
-             << temp_bit << ","
-             << temp_quant << ","
-             << temp_loss << ","
-             << entropy_val << ","
-             << mul8x8 << ","
-             << (entropy_val * mul8x8) << ","
-             << source << "\n";
-  };
-
-  if (allow_JXK) {
-    if (row0[bx + cx + 0].Strategy() != acs_rawJXK) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-          acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
-          temp_bit, temp_quant, temp_loss));
-      log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsJXK.Strategy(),
-                      entropy_mul_JXK, entropy_JXK_left, "FFLD_JXK_LEFT");
-    }
-    if (row0[bx + cx + blocks_half].Strategy() != acs_rawJXK) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-          acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
-          temp_bit, temp_quant, temp_loss));
-      log_entropy_row((bx + cx + blocks_half) * 8, (by + cy) * 8, acsJXK.Strategy(),
-                      entropy_mul_JXK, entropy_JXK_right, "FFLD_JXK_RIGHT");
-    }
-  }
-
-  if (allow_KXJ) {
-    if (row0[bx + cx].Strategy() != acs_rawKXJ) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-          acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
-          temp_bit, temp_quant, temp_loss));
-      log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsKXJ.Strategy(),
-                      entropy_mul_JXK, entropy_KXJ_top, "FFLD_KXJ_TOP");
-    }
-    if (row1[bx + cx].Strategy() != acs_rawKXJ) {
-      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-          acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
-          temp_bit, temp_quant, temp_loss));
-      log_entropy_row((bx + cx) * 8, (by + cy + blocks_half) * 8, acsKXJ.Strategy(),
-                      entropy_mul_JXK, entropy_KXJ_bottom, "FFLD_KXJ_BOT");
-    }
-  }
-
-  if (allow_square_transform) {
-    JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-        acsJXJ, entropy_mul_JXJ, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-        cmap_factors, block, scratch_space, quantized, entropy_JXJ,
-        temp_bit, temp_quant, temp_loss));
-    log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsJXJ.Strategy(),
-                    entropy_mul_JXJ, entropy_JXJ, "FFLD_JXJ");
-  }
-
-  float costJxN = std::min(entropy_JXK_left, entropy[0][0] + entropy[1][0]) +
-                  std::min(entropy_JXK_right, entropy[0][1] + entropy[1][1]);
-  float costNxJ = std::min(entropy_KXJ_top, entropy[0][0] + entropy[0][1]) +
-                  std::min(entropy_KXJ_bottom, entropy[1][0] + entropy[1][1]);
-
-  if (entropy_JXJ < costJxN && entropy_JXJ < costNxJ) {
-    JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawJXJ));
-    SetEntropyForTransform(cx, cy, acs_rawJXJ, entropy_JXJ, entropy_estimate);
-  } else if (costJxN < costNxJ) {
-    if (entropy_JXK_left < entropy[0][0] + entropy[1][0]) {
-      JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawJXK));
-      SetEntropyForTransform(cx, cy, acs_rawJXK, entropy_JXK_left,
-                             entropy_estimate);
-    }
-    if (entropy_JXK_right < entropy[0][1] + entropy[1][1]) {
-      JXL_RETURN_IF_ERROR(
-          ac_strategy->Set(bx + cx + blocks_half, by + cy, acs_rawJXK));
-      SetEntropyForTransform(cx + blocks_half, cy, acs_rawJXK,
-                             entropy_JXK_right, entropy_estimate);
-    }
-  } else {
-    if (entropy_KXJ_top < entropy[0][0] + entropy[0][1]) {
-      JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + cx, by + cy, acs_rawKXJ));
-      SetEntropyForTransform(cx, cy, acs_rawKXJ, entropy_KXJ_top,
-                             entropy_estimate);
-    }
-    if (entropy_KXJ_bottom < entropy[1][0] + entropy[1][1]) {
-      JXL_RETURN_IF_ERROR(
-          ac_strategy->Set(bx + cx, by + cy + blocks_half, acs_rawKXJ));
-      SetEntropyForTransform(cx, cy + blocks_half, acs_rawKXJ,
-                             entropy_KXJ_bottom, entropy_estimate);
-    }
-  }
-  return true;
-}
 Status FindBestFirstLevelDivisionForSquare(
     size_t blocks, bool allow_square_transform, size_t bx, size_t by, size_t cx,
     size_t cy, const ACSConfig& config, const float* JXL_RESTRICT cmap_factors,
@@ -1592,14 +921,17 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
     for (size_t ix = 0; ix < rect.xsize(); ix++) {
       float entropy = 0.0;
       AcStrategyType best_of_8x8s;
-      JXL_RETURN_IF_ERROR(FindBest8x8TransformDebug(
-          8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
-          butteraugli_target, config, cmap_factors, ac_strategy, block,
-          scratch_space, quantized, &entropy, best_of_8x8s));
-      // JXL_RETURN_IF_ERROR(FindBest8x8Transform(
-      //     8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
-      //     butteraugli_target, config, cmap_factors, ac_strategy, block,
-      //     scratch_space, quantized, &entropy, best_of_8x8s));
+      if (kIsCustomDebug) {
+        JXL_RETURN_IF_ERROR(FindBest8x8TransformDebug(
+            8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
+            butteraugli_target, config, cmap_factors, ac_strategy, block,
+            scratch_space, quantized, &entropy, best_of_8x8s));
+      } else {
+        JXL_RETURN_IF_ERROR(FindBest8x8Transform(
+            8 * (bx + ix), 8 * (by + iy), static_cast<int>(cparams.speed_tier),
+            butteraugli_target, config, cmap_factors, ac_strategy, block,
+            scratch_space, quantized, &entropy, best_of_8x8s));
+      }
       JXL_RETURN_IF_ERROR(ac_strategy->Set(bx + ix, by + iy, best_of_8x8s));
 
       //ALPCOM: Formül 2
@@ -1680,16 +1012,17 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
               mt.type == AcStrategyType::DCT32X64) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 8 == 0) {
-              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-              //     8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-              //     mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
-              //     scratch_space, quantized));
-              if ((cy | cx) % 8 == 0) {
+              if (kIsCustomDebug) {
                 JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
                     8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
                     mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
                     scratch_space, quantized,
-                    butteraugli_target, static_cast<int>(cparams.speed_tier))); // <--- Yeni parametreler
+                    butteraugli_target, static_cast<int>(cparams.speed_tier)));
+              } else {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+                    8, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+                    mt.entropy_mul, entropy_mul64X64, entropy_estimate, block,
+                    scratch_space, quantized));
               }
             }
             continue;
@@ -1711,17 +1044,18 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           if (mt.type == AcStrategyType::DCT16X32) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 4 == 0) {
-              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-              //     4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
-              //     ac_strategy, mt.entropy_mul, entropy_mul32X32,
-              //     entropy_estimate, block, scratch_space, quantized));
-
-              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+              if (kIsCustomDebug) {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
                     4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
                     ac_strategy, mt.entropy_mul, entropy_mul32X32,
                     entropy_estimate, block, scratch_space, quantized,
                     butteraugli_target, static_cast<int>(cparams.speed_tier)));
-
+              } else {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+                    4, enable_32x32, bx, by, cx, cy, config, cmap_factors,
+                    ac_strategy, mt.entropy_mul, entropy_mul32X32,
+                    entropy_estimate, block, scratch_space, quantized));
+              }
             }
             continue;
           } else if (mt.type == AcStrategyType::DCT32X16) {
@@ -1741,15 +1075,18 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
           if (mt.type == AcStrategyType::DCT8X16) {
             // We handle both DCT8X16 and DCT16X8 at the same time.
             if ((cy | cx) % 2 == 0) {
-              // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-              //     2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-              //     mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
-              //     scratch_space, quantized));
-              JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+              if (kIsCustomDebug) {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
                     2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
                     mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
                     scratch_space, quantized,
                     butteraugli_target, static_cast<int>(cparams.speed_tier)));
+              } else {
+                JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+                    2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+                    mt.entropy_mul, entropy_mul16X16, entropy_estimate, block,
+                    scratch_space, quantized));
+              }
             }
             continue;
           } else if (mt.type == AcStrategyType::DCT16X8) {
@@ -1770,15 +1107,19 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
         // when there is an odd number of 8x8 blocks, then the last row
         // and column will get their DCT16X8s and DCT8X16s through the
         // normal integral transform merging process.
-        // JXL_RETURN_IF_ERROR(
-        //     TryMergeAcs(mt.type, bx, by, cx, cy, config, cmap_factors,
-        //                 ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
-        //                 entropy_estimate, block, scratch_space, quantized));
-        JXL_RETURN_IF_ERROR(
-    TryMergeAcsDebug(mt.type, bx, by, cx, cy, config, cmap_factors,
-                ac_strategy, mt.entropy_mul, mt.priority, &priority[0],
-                entropy_estimate, block, scratch_space, quantized,
-                butteraugli_target, static_cast<int>(cparams.speed_tier)));
+        if (kIsCustomDebug) {
+          JXL_RETURN_IF_ERROR(TryMergeAcsDebug(
+              mt.type, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+              mt.entropy_mul, mt.priority, &priority[0], entropy_estimate,
+              block, scratch_space, quantized, butteraugli_target,
+              static_cast<int>(cparams.speed_tier)));
+        } else {
+          JXL_RETURN_IF_ERROR(
+              TryMergeAcs(mt.type, bx, by, cx, cy, config, cmap_factors,
+                          ac_strategy, mt.entropy_mul, mt.priority,
+                          &priority[0], entropy_estimate, block, scratch_space,
+                          quantized));
+        }
            }
          }
   }
@@ -1790,15 +1131,18 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
   for (size_t cy = 0; cy + 1 < rect.ysize(); ++cy) {
     for (size_t cx = 0; cx + 1 < rect.xsize(); ++cx) {
       if ((cy | cx) % 2 != 0) {
-        // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-        //     2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-        //     entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
-        //     scratch_space, quantized));
-        JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
-    2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-    entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
-    scratch_space, quantized,
-    butteraugli_target, static_cast<int>(cparams.speed_tier)));
+        if (kIsCustomDebug) {
+          JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+              2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+              entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
+              scratch_space, quantized, butteraugli_target,
+              static_cast<int>(cparams.speed_tier)));
+        } else {
+          JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+              2, true, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+              entropy_mul16X8, entropy_mul16X16, entropy_estimate, block,
+              scratch_space, quantized));
+        }
       }
     }
   }
@@ -1809,42 +1153,22 @@ Status ProcessRectACS(const CompressParams& cparams, const ACSConfig& config,
       if ((cy | cx) % 4 == 0) {
         continue;  // Already tried with loop above (DCT16X32 case).
       }
-      // JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
-      //     4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-      //     entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
-      //     scratch_space, quantized));
-      JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
-    4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
-    entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
-    scratch_space, quantized,
-    butteraugli_target, static_cast<int>(cparams.speed_tier)));
+      if (kIsCustomDebug) {
+        JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquareDebug(
+            4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+            entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
+            scratch_space, quantized, butteraugli_target,
+            static_cast<int>(cparams.speed_tier)));
+      } else {
+        JXL_RETURN_IF_ERROR(FindBestFirstLevelDivisionForSquare(
+            4, enable_32x32, bx, by, cx, cy, config, cmap_factors, ac_strategy,
+            entropy_mul16X32, entropy_mul32X32, entropy_estimate, block,
+            scratch_space, quantized));
+      }
     }
   }
   return true;
 }
-
-
-static inline Status TrySetAcsSafe(AcStrategyImage* acs,
-                                   const Rect& rect_in,
-                                   size_t bx, size_t by,
-                                   AcStrategyType t) {
-  const AcStrategy s = AcStrategy::FromRawStrategy(t);
-
-  // 1) Tüm resim sınırı (8×8 blok grid)
-  if (bx + s.covered_blocks_x() > acs->xsize()) return false;
-  if (by + s.covered_blocks_y() > acs->ysize()) return false;
-
-  // 2) Bu 64×64 rect’in sınırı
-  const size_t rx0 = rect_in.x0(), ry0 = rect_in.y0();
-  const size_t rx1 = rx0 + rect_in.xsize();
-  const size_t ry1 = ry0 + rect_in.ysize();
-  if (bx < rx0 || by < ry0) return false;
-  if (bx + s.covered_blocks_x() > rx1) return false;
-  if (by + s.covered_blocks_y() > ry1) return false;
-
-  return acs->Set(bx, by, t);
-}
-
 
 
 // NOLINTNEXTLINE(google-readability-namespace-comments)
@@ -1855,266 +1179,17 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace jxl {
 
-//ALPCOM: DCT - KUANTALAMA CSV DEBUG
-std::ofstream dct_coeffs_file;
-std::ofstream quantized_coeffs_file;
-std::ofstream quant_field_file;
-std::ofstream quant_matrices_file;
-std::ofstream pre_quant_coeffs_file;
-std::ofstream sparsity_cost_file;
-std::ofstream distortion_cost_file;
-std::ofstream pixel_distortion_file;
-std::ofstream quant_error_file;
-std::ofstream masking_blocks_file;
-std::ofstream entropy_log_file;
-
-void OpenDebugDataFiles() {
-  entropy_log_file.open("entropy_log.csv", std::ios::trunc);
-  if (entropy_log_file.is_open()) {
-    entropy_log_file << "BlokX,BlokY,AcStrategyType,butteraugli_target,"
-                     << "EncodingSpeedTier,Temel_entropy_mul,entropy_mul,"
-                     << "CMapFaktor_X,CMapFaktor_B,Info_Loss,"
-                     << "Zeros_Mul,CostDelta,Kodlama_Maliyeti,quant_norm16,"
-                     << "Loss_Scalar,Maliyet,mul8x8,Son_Maliyet,Source\n";
-  }
-  dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
-  sparsity_cost_file.open("debug_sparsity_cost.csv", std::ios::trunc);
-  quantized_coeffs_file.open("debug_quantized_coeffs.csv", std::ios::trunc);
-  quant_field_file.open("debug_quant_field.csv", std::ios::trunc);
-  quant_matrices_file.open("debug_quant_matrices.csv", std::ios::trunc);
-  pre_quant_coeffs_file.open("debug_pre_quant_coeffs.csv", std::ios::trunc);
-  distortion_cost_file.open("debug_distortion_cost.csv", std::ios::trunc);
-  pixel_distortion_file.open("debug_pixel_distortion.csv", std::ios::trunc); // IDCT
-  quant_error_file.open("debug_quant_error.csv", std::ios::trunc);
-  masking_blocks_file.open("debug_masking_blocks.csv", std::ios::trunc);
-  if (masking_blocks_file.is_open()) {
-    masking_blocks_file << "BlockX,BlockY,MaskValues(64)\n";
-  }
-  if (pixel_distortion_file.is_open()) {
-    pixel_distortion_file << "BlockX,BlockY,Channel,TransformType,Coeffs(64)\n";
-  }
-  if (quant_error_file.is_open()) {
-    quant_error_file << "BlockX,BlockY,Channel,TransformType,QuantError(64)\n";
-  }
-  if (sparsity_cost_file.is_open()) {
-    sparsity_cost_file << "BlockX,BlockY,Channel,TransformType,NumNonZeros,NBits\n";
-  }
-  if (distortion_cost_file.is_open()) {
-    distortion_cost_file << "BlockX,BlockY,TransformType,"
-                         << "RawLoss_X,RawLoss_Y,RawLoss_B,"
-                         << "ChannelMul_X,ChannelMul_Y,ChannelMul_B,"
-                         << "TotalRawLoss,PixelCount,QuantField,"
-                         << "LossScalar,InfoLossMultiplier,FinalDistortionCost\n";
-  }
-  if (pre_quant_coeffs_file.is_open()) {
-    pre_quant_coeffs_file << "BlockX,BlockY,Channel,TransformType,PreQuantCoeffs(64)\n";
-  }
-  if (dct_coeffs_file.is_open()) {
-    dct_coeffs_file << "BlockX,BlockY,Channel,TransformType,Coeffs(64)\n";
-  }
-  if (quantized_coeffs_file.is_open()) {
-    quantized_coeffs_file << "BlockX,BlockY,Channel,TransformType,QuantizedCoeffs(64)\n";
-  }
-  if (quant_field_file.is_open()) {
-    quant_field_file << "BlockX,BlockY,Channel,QuantField\n";
-  }
-  if (quant_matrices_file.is_open()) {
-    quant_matrices_file << "BlockX,BlockY,Channel,TransformType,MatrixType,Values(64)\n";
-  }
-}
-
-void CloseDebugDataFiles() {
-  if (dct_coeffs_file.is_open()) dct_coeffs_file.close();
-  if (quantized_coeffs_file.is_open()) quantized_coeffs_file.close();
-  if (quant_field_file.is_open()) quant_field_file.close();
-  if (quant_matrices_file.is_open()) quant_matrices_file.close();
-  if (pre_quant_coeffs_file.is_open()) pre_quant_coeffs_file.close();
-  if (sparsity_cost_file.is_open()) sparsity_cost_file.close();
-  if (distortion_cost_file.is_open()) distortion_cost_file.close();
-  if (masking_blocks_file.is_open()) masking_blocks_file.close();
-  if (entropy_log_file.is_open()) entropy_log_file.close();
-}
-
-//ALPCOM: DEBUG END
 
 HWY_EXPORT(ProcessRectACS);
-// mul and mul2 represent a scaling difference between jxl and butteraugli.
-const float kSGmul = 226.77216153508914f;
-const float kSGmul2 = 1.0f / 73.377132366608819f;
-// Includes correction factor for std::log -> log2.
-const float kSGRetMul = kSGmul2 * 18.6580932135f * kInvLog2e;
-const float kSGVOffset = 7.7825991679894591f;
-
-template <bool invert, typename D, typename V>
-V RatioOfDerivativesOfCubicRootToSimpleGamma(const D d, V v) {
-  // The opsin space in jxl is the cubic root of photons, i.e., v * v * v
-  // is related to the number of photons.
-  //
-  // SimpleGamma(v * v * v) is the psychovisual space in butteraugli.
-  // This ratio allows quantization to move from jxl's opsin space to
-  // butteraugli's log-gamma space.
-  float kEpsilon = 1e-2;
-  v = ZeroIfNegative(v);
-  const auto kNumMul = Set(d, kSGRetMul * 3 * kSGmul);
-  const auto kVOffset = Set(d, kSGVOffset * kInvLog2e + kEpsilon);
-  const auto kDenMul = Set(d, kInvLog2e * kSGmul);
-
-  const auto v2 = Mul(v, v);
-
-  const auto num = MulAdd(kNumMul, v2, Set(d, kEpsilon));
-  const auto den = MulAdd(Mul(kDenMul, v), v2, kVOffset);
-  return invert ? Div(num, den) : Div(den, num);
-}
-
-template <bool invert = false>
-float RatioOfDerivativesOfCubicRootToSimpleGamma(float v) {
-  using DScalar = HWY_CAPPED(float, 1);
-  auto vscalar = Load(DScalar(), &v);
-  return GetLane(
-      RatioOfDerivativesOfCubicRootToSimpleGamma<invert>(DScalar(), vscalar));
-}
-template <typename D, typename V>
-V MaskingSqrt(const D d, V v) {
-  static const float kLogOffset = 27.505837037000106f;
-  static const float kMul = 211.66567973503678f;
-  const auto mul_v = Set(d, kMul * 1e8);
-  const auto offset_v = Set(d, kLogOffset);
-  return Mul(Set(d, 0.25f), Sqrt(MulAdd(v, Sqrt(mul_v), offset_v)));
-}
-
-float MaskingSqrt(const float v) {
-  using DScalar = HWY_CAPPED(float, 1);
-  auto vscalar = Load(DScalar(), &v);
-  return GetLane(MaskingSqrt(DScalar(), vscalar));
-}
 Status AcStrategyHeuristics::Init(const Image3F& src, const Rect& rect_in,
                                   const ImageF& quant_field, const ImageF& mask,
                                   const ImageF& mask1x1,
                                   DequantMatrices* matrices) {
-  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-  OpenDebugDataFiles();
-{
-      std::ofstream dump_file("debug_masking_parameters.csv", std::ios::trunc);
-      if (dump_file.is_open()) {
-          dump_file << "BlockX,BlockY,Type";
-          for(int i=0; i<64; ++i) dump_file << ",Val" << i;
-          dump_file << "\n";
-
-          const size_t xsize = src.xsize();
-          const size_t ysize = src.ysize();
-          const size_t xsize_blocks = DivCeil(xsize, kBlockDim);
-          const size_t ysize_blocks = DivCeil(ysize, kBlockDim);
-
-          const float match_gamma_offset = 0.019;
-          const float kLimit = 0.2f;
-
-          for (size_t by = 0; by < ysize_blocks; ++by) {
-              for (size_t bx = 0; bx < xsize_blocks; ++bx) {
-
-                  dump_file << bx << "," << by << ",MASK1X1";
-                  for (size_t dy = 0; dy < 8; ++dy) {
-                      for (size_t dx = 0; dx < 8; ++dx) {
-                          size_t x = bx * 8 + dx;
-                          size_t y = by * 8 + dy;
-                          float val = (x < mask1x1.xsize() && y < mask1x1.ysize()) ? mask1x1.Row(y)[x] : 0.0f;
-                          dump_file << "," << std::fixed << std::setprecision(8) << val;
-                      }
-                  }
-                  dump_file << "\n";
-
-                  dump_file << bx << "," << by << ",DIFF1";
-                  for (size_t dy = 0; dy < 8; ++dy) {
-                      const size_t y = by * 8 + dy;
-
-                      const size_t y_c = y >= ysize ? ysize - 1 : y;
-                      const size_t y_t = y_c > 0 ? y_c - 1 : 0;
-                      const size_t y_b = y_c + 1 < ysize ? y_c + 1 : y_c;
-
-                      const float* row_c = src.ConstPlaneRow(1, y_c); // Y Kanalı
-                      const float* row_t = src.ConstPlaneRow(1, y_t);
-                      const float* row_b = src.ConstPlaneRow(1, y_b);
-
-                      for (size_t dx = 0; dx < 8; ++dx) {
-                          const size_t x = bx * 8 + dx;
-                          const size_t x_c = x >= xsize ? xsize - 1 : x;
-                          const size_t x_l = x_c > 0 ? x_c - 1 : 0;
-                          const size_t x_r = x_c + 1 < xsize ? x_c + 1 : x_c;
-
-                          float val_c = row_c[x_c];
-                          float base = 0.25f * (row_t[x_c] + row_b[x_c] + row_c[x_l] + row_c[x_r]);
-                          float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma(val_c + match_gamma_offset);
-
-                          float diff1 = std::abs(gammac * (val_c - base));
-                          dump_file << "," << diff1;
-                      }
-                  }
-                  dump_file << "\n";
-
-                  dump_file << bx << "," << by << ",DIFF2_RECALC";
-                  for (size_t dy = 0; dy < 8; ++dy) {
-                      const size_t y = by * 8 + dy;
-
-                      const size_t y_c = y >= ysize ? ysize - 1 : y;
-                      const size_t y_t = y_c > 0 ? y_c - 1 : 0;
-                      const size_t y_b = y_c + 1 < ysize ? y_c + 1 : y_c;
-
-                      const float* row_c = src.ConstPlaneRow(1, y_c);
-                      const float* row_t = src.ConstPlaneRow(1, y_t);
-                      const float* row_b = src.ConstPlaneRow(1, y_b);
-
-                      for (size_t dx = 0; dx < 8; ++dx) {
-                          const size_t x = bx * 8 + dx;
-                          const size_t x_c = x >= xsize ? xsize - 1 : x;
-                          const size_t x_l = x_c > 0 ? x_c - 1 : 0;
-                          const size_t x_r = x_c + 1 < xsize ? x_c + 1 : x_c;
-
-                          float val_c = row_c[x_c];
-                          float base = 0.25f * (row_t[x_c] + row_b[x_c] + row_c[x_l] + row_c[x_r]);
-                          float gammac = RatioOfDerivativesOfCubicRootToSimpleGamma(val_c + match_gamma_offset);
-
-                          float diff = gammac * (val_c - base);
-                          diff *= diff;
-                          if (diff >= kLimit) diff = kLimit;
-                          diff = MaskingSqrt(diff);
-
-                          dump_file << "," << diff;
-                      }
-                  }
-                  dump_file << "\n";
-              }
-          }
-      }
+  if (kIsCustomDebug) {
+    OpenDebugDataFiles();
+    DumpMaskingParametersCSV(src, mask1x1);
+    DumpMaskingBlocksCSV(mask1x1);
   }
-  //ALPCOM: DEBUG END
-  // ALPCOM: Masking field - CSV
-  static bool mask_blocks_saved = false;
-  if (masking_blocks_file.is_open() && !mask_blocks_saved && mask1x1.xsize() > 0) {
-    const size_t xsize_blocks = DivCeil(mask1x1.xsize(), kBlockDim);
-    const size_t ysize_blocks = DivCeil(mask1x1.ysize(), kBlockDim);
-
-    for (size_t by = 0; by < ysize_blocks; ++by) {
-      for (size_t bx = 0; bx < xsize_blocks; ++bx) {
-        masking_blocks_file << bx << "," << by;
-
-        for (size_t dy = 0; dy < kBlockDim; ++dy) {
-          size_t y = by * kBlockDim + dy;
-          if (y >= mask1x1.ysize()) continue;
-          const float* row = mask1x1.Row(y);
-          for (size_t dx = 0; dx < kBlockDim; ++dx) {
-            size_t x = bx * kBlockDim + dx;
-            float val = 0.0f;
-            if (x < mask1x1.xsize()) {
-              val = row[x];
-            }
-            masking_blocks_file << "," << std::fixed << std::setprecision(8) << val;
-          }
-        }
-        masking_blocks_file << "\n";
-      }
-    }
-    mask_blocks_saved = true;
-  }
-  // ALPCOM
   config.dequant = matrices;
 
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
@@ -2185,23 +1260,9 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
                                          const ColorCorrelationMap& cmap,
                                          AcStrategyImage* ac_strategy,
                                          size_t thread) {
-
-  //ALPCOM: Debug
-  static bool xyb_data_saved = false;
-  if (!xyb_data_saved) {
-    printf("XYB renk kanallari CSV dosyalarina kaydediliyor...\n");
-    const size_t xsize = rect.xsize() * kBlockDim;
-    const size_t ysize = rect.ysize() * kBlockDim;
-
-    SaveChannelToCSV("XYB_X.csv", "X", config.src_rows[0], xsize, ysize,
-                      config.src_stride);
-    SaveChannelToCSV("XYB_Y.csv", "Y (Luma)", config.src_rows[1], xsize, ysize,
-                      config.src_stride);
-    SaveChannelToCSV("XYB_B.csv", "B", config.src_rows[2], xsize, ysize,
-                      config.src_stride);
-    xyb_data_saved = true;
+  if (kIsCustomDebug) {
+    DumpXYBChannelsCSV(config, rect);
   }
-  //ALPCOM: Debug end
 
   // In Cheetah mode, use DCT8 everywhere and uniform quantization.
   if (cparams.speed_tier >= SpeedTier::kCheetah) {
@@ -2253,27 +1314,18 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
   }
 
   if (JXL_DEBUG_AC_STRATEGY && WantDebugOutput(cparams)) {
-    printf("ok");
     JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, frame_dim.xsize,
                                        frame_dim.ysize, "ac_strategy", aux_out,
                                        cparams));
   }
-  //ALPCOM: DCT - KUANTALAMA CSV DEBUG
-  CloseDebugDataFiles();
-  //ALPCOM: Debug End
+  if (kIsCustomDebug) {
+    CloseDebugDataFiles();
 
-
-
-#if JXL_DEBUG_AC_STRATEGY
-  {
     static bool debug_visual_saved = false;
-
     if (!debug_visual_saved) {
-      printf(">>> DEBUG: İlk grup için DumpAcStrategy bloguna giriliyor...\n");
-
-      auto file_writer_callback = [](void* opaque, const char* label,
+      auto file_writer_callback = [](void* /*opaque*/, const char* label,
                                      size_t xsize, size_t ysize,
-                                     const JxlColorEncoding* color,
+                                     const JxlColorEncoding* /*color*/,
                                      const uint16_t* pixels) {
         char filename[256];
         snprintf(filename, sizeof(filename), "%s.ppm", label);
@@ -2282,7 +1334,6 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
           fprintf(f, "P6\n%zu %zu\n65535\n", xsize, ysize);
           fwrite(pixels, sizeof(uint16_t), xsize * ysize * 3, f);
           fclose(f);
-          printf(">>> BASARILI: AC Strategy debug gorseli kaydedildi: %s\n", filename);
         }
       };
 
@@ -2294,13 +1345,11 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
       const size_t strategy_ysize = ac_strategy.ysize() * kBlockDim;
 
       JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, strategy_xsize,
-                          strategy_ysize, "ac_strategy_gorseli",
-                          aux_out, debug_cparams));
-
+                                         strategy_ysize, "ac_strategy_gorseli",
+                                         aux_out, debug_cparams));
       debug_visual_saved = true;
     }
   }
-#endif
   return true;
 }
 
