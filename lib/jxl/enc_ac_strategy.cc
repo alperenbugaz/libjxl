@@ -946,7 +946,8 @@ Status FindBest8x8TransformDebug(size_t x, size_t y, int encoding_speed_tier,
                << loss_scalar << ","
                << entropy_cost << ","
                << mul8x8 << ","
-               << entropy_estimate_val << "\n";
+               << entropy_estimate_val << ","
+               << "FB8X8" << "\n";
     }
 
     if (entropy_cost < best) {
@@ -1143,7 +1144,8 @@ Status TryMergeAcsDebug(AcStrategyType acs_raw, size_t bx, size_t by, size_t cx,
                  << loss_scalar << ","
                  << entropy_candidate << ","
                  << mul8x8 << ","
-                 << entropy_estimate_val << "\n";
+                 << entropy_estimate_val << ","
+                 << "TRYMERGE" << "\n";
       }
   }
 
@@ -1281,45 +1283,71 @@ Status FindBestFirstLevelDivisionForSquareDebug(
 
   float temp_bit = 0, temp_quant = 0, temp_loss = 0;
 
+  static const float k8x8mul1 = -0.4;
+  static const float k8x8mul2 = 1.0;
+  static const float k8x8base = 1.4;
+  const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
+
+  auto log_entropy_row = [&](size_t px, size_t py, AcStrategyType type,
+                             float entropy_mul, float entropy_val,
+                             const char* source) {
+    if (!entropy_log_file.is_open()) return;
+    entropy_log_file << px << ","
+             << py << ","
+             << AcStrategyTypeToString(type) << ","
+             << std::fixed << std::setprecision(6) << butteraugli_target << ","
+             << encoding_speed_tier << ","
+             << 1.0 << ","
+             << entropy_mul << ","
+             << cmap_factors[0] << ","
+             << cmap_factors[2] << ","
+             << config.info_loss_multiplier << ","
+             << config.zeros_mul << ","
+             << config.cost_delta << ","
+             << temp_bit << ","
+             << temp_quant << ","
+             << temp_loss << ","
+             << entropy_val << ","
+             << mul8x8 << ","
+             << (entropy_val * mul8x8) << ","
+             << source << "\n";
+  };
+
   if (allow_JXK) {
     if (row0[bx + cx + 0].Strategy() != acs_rawJXK) {
-      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-      //     acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-      //     cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
-      //     temp_bit, temp_quant, temp_loss));
-      JXL_RETURN_IF_ERROR(EstimateEntropy(
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
           acsJXK, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_left));
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_left,
+          temp_bit, temp_quant, temp_loss));
+      log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsJXK.Strategy(),
+                      entropy_mul_JXK, entropy_JXK_left, "FFLD_JXK_LEFT");
     }
     if (row0[bx + cx + blocks_half].Strategy() != acs_rawJXK) {
-      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-      //     acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
-      //     cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
-      //     temp_bit, temp_quant, temp_loss));
-      JXL_RETURN_IF_ERROR(EstimateEntropy(
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
           acsJXK, entropy_mul_JXK, (bx + cx + blocks_half) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_JXK_right));
+          cmap_factors, block, scratch_space, quantized, entropy_JXK_right,
+          temp_bit, temp_quant, temp_loss));
+      log_entropy_row((bx + cx + blocks_half) * 8, (by + cy) * 8, acsJXK.Strategy(),
+                      entropy_mul_JXK, entropy_JXK_right, "FFLD_JXK_RIGHT");
     }
   }
 
   if (allow_KXJ) {
     if (row0[bx + cx].Strategy() != acs_rawKXJ) {
-      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-      //     acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-      //     cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
-      //     temp_bit, temp_quant, temp_loss));
-      JXL_RETURN_IF_ERROR(EstimateEntropy(
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
           acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top));
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_top,
+          temp_bit, temp_quant, temp_loss));
+      log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsKXJ.Strategy(),
+                      entropy_mul_JXK, entropy_KXJ_top, "FFLD_KXJ_TOP");
     }
     if (row1[bx + cx].Strategy() != acs_rawKXJ) {
-      // JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
-      //     acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
-      //     cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
-      //     temp_bit, temp_quant, temp_loss));
-      JXL_RETURN_IF_ERROR(EstimateEntropy(
+      JXL_RETURN_IF_ERROR(EstimateEntropyDebug(
           acsKXJ, entropy_mul_JXK, (bx + cx + 0) * 8, (by + cy + blocks_half) * 8, config,
-          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom));
+          cmap_factors, block, scratch_space, quantized, entropy_KXJ_bottom,
+          temp_bit, temp_quant, temp_loss));
+      log_entropy_row((bx + cx) * 8, (by + cy + blocks_half) * 8, acsKXJ.Strategy(),
+                      entropy_mul_JXK, entropy_KXJ_bottom, "FFLD_KXJ_BOT");
     }
   }
 
@@ -1328,32 +1356,8 @@ Status FindBestFirstLevelDivisionForSquareDebug(
         acsJXJ, entropy_mul_JXJ, (bx + cx + 0) * 8, (by + cy + 0) * 8, config,
         cmap_factors, block, scratch_space, quantized, entropy_JXJ,
         temp_bit, temp_quant, temp_loss));
-
-    static const float k8x8mul1 = -0.4;
-    static const float k8x8mul2 = 1.0;
-    static const float k8x8base = 1.4;
-    const float mul8x8 = k8x8mul2 + k8x8mul1 / (butteraugli_target + k8x8base);
-    const float entropy_estimate_val = entropy_JXJ * mul8x8;
-    if (entropy_log_file.is_open()) {
-        entropy_log_file << (bx + cx) * 8 << ","
-                 << (by + cy) * 8 << ","
-                 << AcStrategyTypeToString(acsJXJ.Strategy()) << ","
-                 << std::fixed << std::setprecision(6) << butteraugli_target << ","
-                 << encoding_speed_tier << ","
-                 << 1.0 << ","
-                 << entropy_mul_JXJ << ","
-                 << cmap_factors[0] << ","
-                 << cmap_factors[2] << ","
-                 << config.info_loss_multiplier << ","
-                 << config.zeros_mul << ","
-                 << config.cost_delta << ","
-                 << temp_bit << ","
-                 << temp_quant << ","
-                 << temp_loss << ","
-                 << entropy_JXJ << ","
-                 << mul8x8 << ","
-                 << entropy_estimate_val << "\n";
-    }
+    log_entropy_row((bx + cx) * 8, (by + cy) * 8, acsJXJ.Strategy(),
+                    entropy_mul_JXJ, entropy_JXJ, "FFLD_JXJ");
   }
 
   float costJxN = std::min(entropy_JXK_left, entropy[0][0] + entropy[1][0]) +
@@ -1871,7 +1875,7 @@ void OpenDebugDataFiles() {
                      << "EncodingSpeedTier,Temel_entropy_mul,entropy_mul,"
                      << "CMapFaktor_X,CMapFaktor_B,Info_Loss,"
                      << "Zeros_Mul,CostDelta,Kodlama_Maliyeti,quant_norm16,"
-                     << "Loss_Scalar,Maliyet,mul8x8,Son_Maliyet\n";
+                     << "Loss_Scalar,Maliyet,mul8x8,Son_Maliyet,Source\n";
   }
   dct_coeffs_file.open("debug_dct_coeffs.csv", std::ios::trunc);
   sparsity_cost_file.open("debug_sparsity_cost.csv", std::ios::trunc);
