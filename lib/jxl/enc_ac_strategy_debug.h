@@ -47,9 +47,6 @@ std::string AcStrategyTypeToString(AcStrategyType type);
 void DumpMaskingParametersCSV(const Image3F& src, const ImageF& mask1x1);
 void DumpMaskingBlocksCSV(const ImageF& mask1x1);
 
-// One-shot XYB channel dump from AcStrategyHeuristics::ProcessRect.
-void DumpXYBChannelsCSV(const ACSConfig& config, const Rect& rect);
-
 // Optional .ppm visualization from AcStrategyHeuristics::Finalize.
 Status DumpAcStrategyDebugVisual(const AcStrategyImage& ac_strategy,
                                  const CompressParams& cparams,

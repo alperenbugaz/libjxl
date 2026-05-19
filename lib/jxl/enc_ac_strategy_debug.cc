@@ -17,7 +17,6 @@
 
 #include "lib/jxl/ac_strategy.h"
 #include "lib/jxl/base/common.h"
-#include "lib/jxl/enc_xyb.h"
 #include "lib/jxl/image.h"
 
 namespace jxl {
@@ -284,21 +283,6 @@ void DumpMaskingBlocksCSV(const ImageF& mask1x1) {
     }
   }
   mask_blocks_saved = true;
-}
-
-void DumpXYBChannelsCSV(const ACSConfig& config, const Rect& rect) {
-  static bool xyb_data_saved = false;
-  if (xyb_data_saved) return;
-  printf("XYB renk kanallari CSV dosyalarina kaydediliyor...\n");
-  const size_t xsize = rect.xsize() * kBlockDim;
-  const size_t ysize = rect.ysize() * kBlockDim;
-  SaveChannelToCSV("XYB_X.csv", "X", config.src_rows[0], xsize, ysize,
-                   config.src_stride);
-  SaveChannelToCSV("XYB_Y.csv", "Y (Luma)", config.src_rows[1], xsize, ysize,
-                   config.src_stride);
-  SaveChannelToCSV("XYB_B.csv", "B", config.src_rows[2], xsize, ysize,
-                   config.src_stride);
-  xyb_data_saved = true;
 }
 
 }  // namespace jxl

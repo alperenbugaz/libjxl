@@ -243,21 +243,6 @@ Status ToXYB(const ColorEncoding& c_current, float intensity_target,
   if (black) JXL_ENSURE(SameSize(*image, *black));
   if (linear) JXL_ENSURE(SameSize(*image, *linear));
 
-  //ALPCOM Debug
-  static bool rgb_data_saved = false;
-  if (!rgb_data_saved) {
-    printf("Dogrusal RGB renk kanallari CSV dosyalarina kaydediliyor...\n");
-    SaveChannelToCSV("RGB_R.csv", "Kirmizi (R)", image->Plane(0).Row(0), image->xsize(),
-                      image->ysize(), image->PixelsPerRow());
-    SaveChannelToCSV("RGB_G.csv", "Yesil (G)", image->Plane(1).Row(0), image->xsize(),
-                      image->ysize(), image->PixelsPerRow());
-    SaveChannelToCSV("RGB_B.csv", "Mavi (B)", image->Plane(2).Row(0), image->xsize(),
-                      image->ysize(), image->PixelsPerRow());
-    rgb_data_saved = true;
-  }
-  //ALPCOM Debug end
-
-
   JxlMemoryManager* memory_manager = image->memory_manager();
   JXL_ENSURE(memory_manager);
 
