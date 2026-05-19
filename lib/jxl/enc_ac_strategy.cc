@@ -36,6 +36,7 @@
 #include "lib/jxl/enc_params.h"
 #include "lib/jxl/enc_ac_strategy_debug.h"
 #include "lib/jxl/enc_ac_strategy_debug-inl.h"
+#include "lib/jxl/enc_ac_strategy_proposed.h"
 #include "lib/jxl/enc_transforms-inl.h"
 #include "lib/jxl/simd_util.h"
 
@@ -1266,6 +1267,10 @@ Status AcStrategyHeuristics::ProcessRect(const Rect& rect,
     return true;
   }
 
+  if (kUseProposedAcStrategy) {
+    return ProcessRectACSProposed(config, rect, ac_strategy);
+  }
+
   return HWY_DYNAMIC_DISPATCH(ProcessRectACS)(
       cparams, config, rect, cmap,
       mem.address<float>() + thread * mem_per_thread,
@@ -1316,7 +1321,9 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
   }
   if (kIsCustomDebug) {
     CloseDebugDataFiles();
+  }
 
+  if (kIsCustomDebug || kUseProposedAcStrategy) {
     static bool debug_visual_saved = false;
     if (!debug_visual_saved) {
       auto file_writer_callback = [](void* /*opaque*/, const char* label,
@@ -1340,9 +1347,16 @@ Status AcStrategyHeuristics::Finalize(const FrameDimensions& frame_dim,
       const size_t strategy_xsize = ac_strategy.xsize() * kBlockDim;
       const size_t strategy_ysize = ac_strategy.ysize() * kBlockDim;
 
+      const char* label = kUseProposedAcStrategy ? "ac_strategy_proposed"
+                                                 : "ac_strategy_gorseli";
+
       JXL_RETURN_IF_ERROR(DumpAcStrategy(ac_strategy, strategy_xsize,
-                                         strategy_ysize, "ac_strategy_gorseli",
-                                         aux_out, debug_cparams));
+                                         strategy_ysize, label, aux_out,
+                                         debug_cparams));
+
+      // Companion: importance map (mask1x1) as grayscale PPM.
+      DumpMask1x1PPM(config, "mask1x1.ppm");
+
       debug_visual_saved = true;
     }
   }

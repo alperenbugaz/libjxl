@@ -304,6 +304,8 @@ set(JPEGXL_INTERNAL_ENC_SOURCES
   jxl/enc_ac_strategy_debug.cc
   jxl/enc_ac_strategy_debug.h
   jxl/enc_ac_strategy_debug-inl.h
+  jxl/enc_ac_strategy_proposed.cc
+  jxl/enc_ac_strategy_proposed.h
   jxl/enc_adaptive_quantization.cc
   jxl/enc_adaptive_quantization.h
   jxl/enc_ans.cc
