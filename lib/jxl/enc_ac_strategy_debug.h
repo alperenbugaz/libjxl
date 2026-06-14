@@ -23,7 +23,7 @@ namespace jxl {
 //   true  -> CSV dumps + Debug variants of EstimateEntropy / FindBest*
 //   false -> original libjxl flow (no I/O, no extra work)
 // Flip and rebuild to toggle.
-constexpr bool kIsCustomDebug = false;
+constexpr bool kIsCustomDebug = true;
 
 // CSV output streams (defined in enc_ac_strategy_debug.cc).
 extern std::ofstream dct_coeffs_file;
